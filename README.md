@@ -1,6 +1,6 @@
 # SeaTube Downloader
 
-A command-line Python tool for programmatically fetching annotations and their corresponding video files from Ocean Networks Canada's [SeaTube](https://data.oceannetworks.ca/SeaTube) system, leveraging the Oceans 3.0 API.
+A command-line Python tool suite for programmatically fetching annotations and their corresponding video files from Ocean Networks Canada's [SeaTube](https://data.oceannetworks.ca/SeaTube) system, leveraging the Oceans 3.0 API.
 
 ## Installation
 
@@ -19,15 +19,31 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Usage
+## Tools
 
-This tool utilizes the `STEXPORT` (SeaTube Export) data product from the ONC API to retrieve annotations and media. 
+### 1. `search_seatube.py` (Preliminary Search)
+
+Before downloading heavy video files, you can use the `search_seatube.py` script to do a preliminary query. This orders the SeaTube Expert Annotation data over a broad time frame and summarizes which dives, locations, and annotators actually have matching data.
+
+```bash
+python search_seatube.py \
+    --token YOUR_TOKEN \
+    --taxonomy-id 1 \
+    --start-date 2023-01-01T00:00:00.000Z \
+    --end-date 2023-12-31T23:59:59.000Z
+```
+
+This returns a clear terminal breakdown of how many WoRMS annotations were found per location and dive, helping you explicitly identify which parameters to feed to the downloader.
+
+### 2. `download_seatube.py` (Export & Download)
+
+This script utilizes the `STEXPORT` (SeaTube Export) data product from the ONC API to retrieve the actual CSV records and any visual media.
 
 ```bash
 python download_seatube.py --token YOUR_TOKEN [options]
 ```
 
-### Options
+#### Options
 
 | Argument | Description | Required | Example |
 |---|---|---|---|
@@ -41,9 +57,9 @@ python download_seatube.py --token YOUR_TOKEN [options]
 | `--include-snapshots` | Pass this flag to include thumbnail PNGs in the STEXPORT. | No | `--include-snapshots` |
 | `--download-videos` | **[WIP]** Pass this flag to parse the annotation CSV and initiate downloads of the source `.mp4` video files from the ONC archive. | No | `--download-videos` |
 
-### Examples
+#### Example
 
-**1. Download a generic set of WoRMS (id 1) annotations with thumbnail images across January 2023 at Cascadia Basin:**
+**Download a generic set of WoRMS (id 1) annotations with thumbnail images across January 2023 at Cascadia Basin:**
 
 ```bash
 python download_seatube.py \
@@ -52,16 +68,5 @@ python download_seatube.py \
     --location-code CBBNC \
     --start-date 2023-01-01T00:00:00.000Z \
     --end-date 2023-01-31T23:59:59.000Z \
-    --include-snapshots
-```
-
-**2. Download WoRMS annotations & video thumbnails from a specific annotator for a specific dive:**
-
-```bash
-python download_seatube.py \
-    --token YOUR_TOKEN \
-    --dive-id 23331 \
-    --user-id 1582 \
-    --taxonomy-id 1 \
     --include-snapshots
 ```
