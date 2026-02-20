@@ -4,13 +4,16 @@ import os
 import json
 import csv
 from onc.onc import ONC
+from dotenv import load_dotenv
 
 def parse_args():
+    load_dotenv()
+    
     parser = argparse.ArgumentParser(description="Download SeaTube annotations and videos from ONC.",
                                      formatter_class=argparse.RawTextHelpFormatter)
 
     # Core requirements API
-    parser.add_argument('--token', type=str, required=True, help="ONC Web Services API User token (UUID)")
+    parser.add_argument('--token', type=str, default=os.getenv("ONC_TOKEN"), help="ONC Web Services API User token (UUID). Can also be set via ONC_TOKEN in .env file.")
     
     # Taxonomic and User filtering
     parser.add_argument('--taxonomy-id', type=int, default=1, help="Taxonomy ID to filter by. Default: 1 (WoRMS)")
@@ -28,7 +31,11 @@ def parse_args():
     # TODO flag
     parser.add_argument('--download-videos', action='store_true', help="Parse the annotations CSV to download matching raw video clips from the archive.")
     
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not args.token:
+        parser.error("ONC token must be provided via --token or ONC_TOKEN in .env file.")
+        
+    return args
 
 
 def download_seatube_annotations(args, onc: ONC):

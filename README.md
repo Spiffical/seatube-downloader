@@ -19,6 +19,15 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+### Authentication setup
+You can pass your ONC API token directly via the `--token` flag, or you can create a `.env` file in the base of this project and place your token inside it. Start by copying the example environment variable file:
+
+```bash
+cp .env.example .env
+```
+
+Open `.env` and paste in your token securely.
+
 ## Tools
 
 ### 1. `search_seatube.py` (Preliminary Search)
@@ -27,7 +36,6 @@ Before downloading heavy video files, you can use the `search_seatube.py` script
 
 ```bash
 python search_seatube.py \
-    --token YOUR_TOKEN \
     --taxonomy-id 1 \
     --start-date 2023-01-01T00:00:00.000Z \
     --end-date 2023-12-31T23:59:59.000Z
@@ -40,14 +48,14 @@ This returns a clear terminal breakdown of how many WoRMS annotations were found
 This script utilizes the `STEXPORT` (SeaTube Export) data product from the ONC API to retrieve the actual CSV records and any visual media.
 
 ```bash
-python download_seatube.py --token YOUR_TOKEN [options]
+python download_seatube.py [options]
 ```
 
 #### Options
 
 | Argument | Description | Required | Example |
 |---|---|---|---|
-| `--token` | Your ONC API Token. | **Yes** | `1234abcd-56ef...` |
+| `--token` | Your ONC API Token. | **No** (if using `.env`) | `1234abcd-56ef...` |
 | `--taxonomy-id` | Optional taxonomy filter. Set to `1` for the World Register of Marine Species (WoRMS). | No | `1` |
 | `--user-id` | Filter annotations created by a specific User ID. | No | `12323` |
 | `--dive-id` | Download annotations for specific dive(s). Comma separated. | No | `23331,23332` |
@@ -63,7 +71,6 @@ python download_seatube.py --token YOUR_TOKEN [options]
 
 ```bash
 python download_seatube.py \
-    --token 77d0e9cf-92dc-4bd8-9a6f-390807e8336d \
     --taxonomy-id 1 \
     --location-code CBBNC \
     --start-date 2023-01-01T00:00:00.000Z \

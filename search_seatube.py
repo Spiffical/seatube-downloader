@@ -5,18 +5,25 @@ import zipfile
 import csv
 from collections import defaultdict
 from onc.onc import ONC
+from dotenv import load_dotenv
 
 def parse_args():
+    load_dotenv()
+    
     parser = argparse.ArgumentParser(description="Search SeaTube for annotated videos and summarize results.",
                                      formatter_class=argparse.RawTextHelpFormatter)
 
-    parser.add_argument('--token', type=str, required=True, help="ONC Web Services API User token")
+    parser.add_argument('--token', type=str, default=os.getenv("ONC_TOKEN"), help="ONC Web Services API User token. Can also be set via ONC_TOKEN in .env file.")
     parser.add_argument('--taxonomy-id', type=int, default=1, help="Taxonomy ID to filter by. Default: 1 (WoRMS)")
     parser.add_argument('--location-code', type=str, help="ONC Location code (e.g. CBBNC)")
     parser.add_argument('--start-date', type=str, required=True, help="ISO8601 start date timestamp (e.g. 2022-01-01T00:00:00.000Z)")
     parser.add_argument('--end-date', type=str, required=True, help="ISO8601 end date timestamp")
     
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not args.token:
+        parser.error("ONC token must be provided via --token or ONC_TOKEN in .env file.")
+        
+    return args
 
 def search_seatube(args):
     # Setup working directory for the search outputs
