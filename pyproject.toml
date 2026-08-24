@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "seatube-downloader"
+version = "0.2.0"
+description = "Explore Ocean Networks Canada's SeaTube annotations and download exactly the labelled frames, clips, or metadata you need"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "requests",
+    "python-dotenv",
+    "onc",
+]
+
+[project.scripts]
+seatube = "seatube.cli:main"
+
+[project.urls]
+Repository = "https://github.com/Spiffical/seatube-downloader"
+
+[tool.setuptools.packages.find]
+include = ["seatube*"]

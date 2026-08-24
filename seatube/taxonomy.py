@@ -1,4 +1,4 @@
-"""Broad taxonomic groups ("crabs", "sponges") for SeaTube annotations.
+"""Broad taxonomic groups ("crabs", "sponges") and WoRMS lineage matching.
 
 SeaTube annotations carry a WoRMS AphiaID but no lineage, so "give me every
 crab" cannot be asked of the ONC API directly.  This module resolves an
@@ -24,7 +24,7 @@ import requests
 WORMS_REST = "https://www.marinespecies.org/rest"
 
 # group name -> (ancestor taxa, human description)
-GROUPS: Dict[str, Dict[str, Any]] = {
+TAXON_GROUPS: Dict[str, Dict[str, Any]] = {
     "fish": {
         "ancestors": ["Actinopterygii", "Chondrichthyes", "Elasmobranchii",
                       "Holocephali", "Myxini", "Petromyzontida"],
@@ -80,7 +80,7 @@ GROUPS: Dict[str, Dict[str, Any]] = {
 }
 
 # colloquial spellings accepted on the command line
-ALIASES: Dict[str, str] = {
+GROUP_ALIASES: Dict[str, str] = {
     "crab": "crabs", "sponge": "sponges", "seastar": "sea-stars", "starfish": "sea-stars",
     "sea-star": "sea-stars", "urchin": "sea-urchins", "sea-urchin": "sea-urchins",
     "urchins": "sea-urchins", "cucumber": "sea-cucumbers", "sea-cucumber": "sea-cucumbers",
@@ -98,27 +98,27 @@ ALIASES: Dict[str, str] = {
 }
 
 
-def normalize_group(name: str) -> str:
+def normalize_group_name(name: str) -> str:
     """Map a user-typed group name onto a canonical key, or raise."""
     key = str(name).strip().lower().replace("_", "-").replace(" ", "-")
-    key = ALIASES.get(key, key)
-    if key not in GROUPS:
+    key = GROUP_ALIASES.get(key, key)
+    if key not in TAXON_GROUPS:
         raise KeyError(name)
     return key
 
 
-def group_ancestors(names: Iterable[str]) -> Set[str]:
+def ancestors_for_groups(names: Iterable[str]) -> Set[str]:
     """Collect the ancestor taxa for a set of group names (lowercased)."""
     out: Set[str] = set()
     for name in names:
-        out.update(a.lower() for a in GROUPS[normalize_group(name)]["ancestors"])
+        out.update(a.lower() for a in TAXON_GROUPS[normalize_group_name(name)]["ancestors"])
     return out
 
 
 def format_group_table() -> str:
-    width = max(len(k) for k in GROUPS)
+    width = max(len(k) for k in TAXON_GROUPS)
     lines = [f"{'group':<{width}}  matches (WoRMS ancestor taxa)", "-" * (width + 50)]
-    for name, spec in GROUPS.items():
+    for name, spec in TAXON_GROUPS.items():
         lines.append(f"{name:<{width}}  {spec['description']} [{', '.join(spec['ancestors'])}]")
     return "\n".join(lines)
 
@@ -151,8 +151,12 @@ def taxon_names(taxon: Dict[str, Any]) -> List[str]:
     return [str(n).strip() for n in raw if n]
 
 
-class TaxonResolver:
-    """Resolves AphiaIDs to WoRMS lineages, with an on-disk cache."""
+class WormsResolver:
+    """Resolves WoRMS AphiaIDs to full lineages, with an on-disk cache.
+
+    One REST call per distinct taxon, ever: lineages go into a JSON cache
+    keyed by AphiaID, and ``offline=True`` forbids network entirely.
+    """
 
     def __init__(
         self,
@@ -250,12 +254,12 @@ class TaxonResolver:
         aphia_id = aphia_id_from_taxon(taxon)
         if aphia_id is not None:
             names.update(n.lower() for n in self.lineage(aphia_id))
-        return [g for g, spec in GROUPS.items()
+        return [g for g, spec in TAXON_GROUPS.items()
                 if names & {a.lower() for a in spec["ancestors"]}]
 
 
-def resolve_wanted(groups: Sequence[str], ancestors: Sequence[str]) -> Set[str]:
+def wanted_ancestor_names(groups: Sequence[str], ancestors: Sequence[str]) -> Set[str]:
     """Build the lowercased ancestor set from --group and --taxon-name values."""
-    wanted = group_ancestors(groups) if groups else set()
+    wanted = ancestors_for_groups(groups) if groups else set()
     wanted.update(a.strip().lower() for a in ancestors if a.strip())
     return wanted

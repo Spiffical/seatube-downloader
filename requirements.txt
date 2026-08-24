@@ -1,4 +1,3 @@
-onc
-python-dateutil
-python-dotenv
 requests
+python-dotenv
+onc
