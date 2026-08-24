@@ -62,6 +62,7 @@ seatube images --group crabs --max-images 4
 | `seatube images` | extract labelled stills + a CSV/JSONL index |
 | `seatube videos` | download whole archive video files |
 | `seatube groups` | the broad taxon-group vocabulary |
+| `seatube dives` | ROV dives in a date range, with their ids |
 | `seatube locations` | fixed-camera site ids |
 
 Only `survey`, `fetch`, and the actual downloads talk to ONC — everything

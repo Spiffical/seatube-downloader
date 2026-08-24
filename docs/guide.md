@@ -46,13 +46,48 @@ You can filter at fetch time too — the same `--group`, `--creator`,
 `--reviewed-only`, etc. work here — but fetching broadly and filtering
 offline is usually better: one fetch, many slices.
 
-Add `--camera-mode stationary` (or `both`) for fixed-camera annotations:
+To target specific dives instead of a whole date range, list them first —
+`seatube dives` is where dive ids come from:
 
 ```bash
-seatube locations                     # list fixed-camera sites and their ids
+seatube dives --start-date 2019-07-01T00:00:00.000Z --end-date 2019-07-10T00:00:00.000Z
+```
+
+```
+dive_id  dive             start             end               area              comment
+------------------------------------------------------------------------------------------
+1463     EX1903L2_Dive13  2019-07-05T12:00  2019-07-05T21:00  Southeast U.S.    Roanoke Minor Canyon...
+1473     EX1903L2_Dive14  2019-07-06T12:00  2019-07-06T23:00  Southeast U.S.    Bodie Seep
+...
+```
+
+```bash
+seatube fetch --dive-id 1473 \
+  --start-date 2019-07-06T00:00:00.000Z --end-date 2019-07-06T23:59:59.000Z
+```
+
+Fixed cameras work the same way: `seatube locations` is where site ids come
+from.
+
+```bash
+seatube locations
+```
+
+```
+id    path
+--------------------------------------------------------------------------------------
+...
+2334  Fixed Cameras > Pacific > British Columbia North Coast > Douglas Channel > Hartley Bay Shore Station
+2335  Fixed Cameras > Pacific > British Columbia North Coast > Douglas Channel > Hartley Bay Underwater Network
+...
+```
+
+```bash
 seatube fetch --camera-mode stationary --search-tree-node-id 2335 \
   --start-date 2021-10-01T00:00:00.000Z --end-date 2021-12-31T23:59:59.000Z
 ```
+
+(Or skip the ids entirely: `--location-name-contains "Hartley Bay"`.)
 
 ## 3. Who annotated? — `annotators`
 
@@ -75,10 +110,10 @@ per annotator. `--csv annotators.csv` writes the full table (including user
 ids and emails, which ONC publishes with the annotations).
 
 To keep only one person's work, filter any command with `--creator` (name
-substring) or `--creator-id` (exact):
+substring) or `--creator-id` — the exact id from the `user_id` column above:
 
 ```bash
-seatube taxa --creator-id 49360
+seatube taxa --creator-id 49360               # Upasana Ganguly, per the table
 seatube images --creator "Ganguly" --group crabs --max-images 10
 ```
 

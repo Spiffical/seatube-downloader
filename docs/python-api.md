@@ -91,12 +91,18 @@ df.groupby("taxon_display_text").size().sort_values(ascending=False)
 higher-level objects don't cover:
 
 ```python
-client.list_dives()
-client.dive_annotations(1473)
-client.dive_video_metadata(1473, "L")
-client.fixed_camera_tree()
-client.annotation_detail(6791290)
-client.taxon_detail(1, 364)               # ONC taxonomy id, ONC taxon id
-client.archive_file_size("INSITEZEUSPLUS_...mp4")
-client.download_archive_file("INSITEZEUSPLUS_...mp4", "local.mp4")
+dives = client.list_dives()                    # every dive: diveId, referenceDiveId, dates...
+dive_id = dives[0]["diveId"]                   # e.g. 1473 == EX1903L2_Dive14
+
+client.dive_annotations(dive_id)
+client.dive_video_metadata(dive_id, "L")
+client.fixed_camera_tree()                     # node ids for stationary queries
+
+ann = annotations[0]                           # from any AnnotationSet
+client.annotation_detail(ann.id)
+client.archive_file_size(ann.archive_filename)
+client.download_archive_file(ann.archive_filename, "local.mp4")
+
+taxon = ann.taxa[0].raw                        # taxonomyId/taxonId are ONC-internal
+client.taxon_detail(taxon["taxonomyId"], taxon["taxonId"])
 ```

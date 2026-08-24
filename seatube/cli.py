@@ -8,6 +8,7 @@
     images      extract labelled still images
     videos      download whole archive video files
     groups      the broad taxon-group vocabulary
+    dives       ROV dives in a date range, with their ids
     locations   fixed-camera location ids
 
 ``fetch`` is the only command that must query ONC; everything below it works
@@ -26,7 +27,8 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from .annotations import AnnotationSet, ReviewFilters
 from .client import OncClient
-from .fetch import AnnotationFetcher, FetchFilters, fixed_camera_locations
+from .archive import parse_iso_utc
+from .fetch import AnnotationFetcher, FetchFilters, dives_in_range, fixed_camera_locations
 from .images import ImageDownloader, build_frames, select_frames
 from .taxonomy import WormsResolver, format_group_table, normalize_group_name
 
@@ -387,6 +389,27 @@ def cmd_groups(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_dives(args: argparse.Namespace) -> int:
+    client = OncClient(args.token)
+    dives = dives_in_range(
+        client, parse_iso_utc(args.start_date), parse_iso_utc(args.end_date)
+    )
+    rows = [
+        {
+            "dive_id": d["diveId"],
+            "dive": d.get("referenceDiveId") or "",
+            "start": (d.get("dateFrom") or "")[:16],
+            "end": (d.get("dateTo") or "")[:16],
+            "area": (d.get("area") or "").rstrip(", "),
+            "comment": (d.get("diveComment") or "")[:40],
+        }
+        for d in dives
+    ]
+    print_table(rows, ["dive_id", "dive", "start", "end", "area", "comment"], args.limit or None)
+    print("\nUse a dive_id with `seatube fetch --dive-id <id>`.")
+    return 0
+
+
 def cmd_locations(args: argparse.Namespace) -> int:
     client = OncClient(args.token)
     locations = fixed_camera_locations(client)
@@ -526,6 +549,11 @@ def build_parser() -> argparse.ArgumentParser:
     # groups / locations
     p = sub.add_parser("groups", help="the broad taxon-group vocabulary")
     p.set_defaults(func=cmd_groups)
+
+    p = sub.add_parser("dives", help="ROV dives in a date range, with their ids")
+    add_date_args(p)
+    common(p)
+    p.set_defaults(func=cmd_dives)
 
     p = sub.add_parser("locations", help="fixed-camera location ids")
     common(p)

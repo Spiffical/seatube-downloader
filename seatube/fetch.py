@@ -103,6 +103,41 @@ class FetchFilters:
         return False
 
 
+def dives_in_range(
+    client: OncClient,
+    start_dt: datetime,
+    end_dt: datetime,
+    dive_ids: Set[int] = frozenset(),
+    max_dives: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Dives whose [dateFrom, dateTo] overlaps the range, sorted by start.
+
+    This is also how you discover dive ids for ``--dive-id``: each row
+    carries ``diveId`` and the human name (``referenceDiveId``).
+    """
+    selected = []
+    for dive in client.list_dives():
+        dive_id = int(dive.get("diveId", 0))
+        if dive_id <= 0:
+            continue
+        if dive_ids and dive_id not in dive_ids:
+            continue
+        date_from, date_to = dive.get("dateFrom"), dive.get("dateTo")
+        if not date_from or not date_to:
+            continue
+        try:
+            dive_start, dive_end = parse_iso_utc(date_from), parse_iso_utc(date_to)
+        except Exception:
+            continue
+        if dive_end < start_dt or dive_start > end_dt:
+            continue
+        selected.append(dive)
+    selected.sort(key=lambda d: d.get("dateFrom", ""))
+    if max_dives is not None:
+        selected = selected[:max_dives]
+    return selected
+
+
 def fixed_camera_locations(client: OncClient) -> List[Dict[str, Any]]:
     """Flatten ONC's fixed-camera tree into (id, name, path) rows."""
     leaves: List[Dict[str, Any]] = []
@@ -208,29 +243,11 @@ class AnnotationFetcher:
         start_dt: datetime,
         end_dt: datetime,
     ) -> List[Dict[str, Any]]:
-        all_dives = self.client.list_dives()
-        selected = []
-        for dive in all_dives:
-            dive_id = int(dive.get("diveId", 0))
-            if dive_id <= 0:
-                continue
-            if filters.dive_ids and dive_id not in filters.dive_ids:
-                continue
-            date_from, date_to = dive.get("dateFrom"), dive.get("dateTo")
-            if not date_from or not date_to:
-                continue
-            try:
-                dive_start, dive_end = parse_iso_utc(date_from), parse_iso_utc(date_to)
-            except Exception:
-                continue
-            if dive_end < start_dt or dive_start > end_dt:
-                continue
-            selected.append(dive)
-        selected.sort(key=lambda d: d.get("dateFrom", ""))
-        if filters.max_dives is not None:
-            selected = selected[: filters.max_dives]
-
-        print(f"Dives overlapping the date range: {len(selected)} (of {len(all_dives)} listed)")
+        selected = dives_in_range(
+            self.client, start_dt, end_dt,
+            dive_ids=filters.dive_ids, max_dives=filters.max_dives,
+        )
+        print(f"Dives overlapping the date range: {len(selected)}")
 
         matched: List[Dict[str, Any]] = []
         for index, dive in enumerate(selected, start=1):

@@ -33,7 +33,8 @@ nearest-row behaviour silently produced false clips across gaps.
 | `seatube images` | download only | extract labelled stills + index |
 | `seatube videos` | yes | download whole archive files |
 | `seatube groups` | no | the 44-group vocabulary |
-| `seatube locations` | yes | fixed-camera site ids for `--search-tree-node-id` |
+| `seatube dives` | yes | ROV dives in a date range — the source of `--dive-id` values |
+| `seatube locations` | yes | fixed-camera site ids — the source of `--search-tree-node-id` values |
 
 Every command accepts `--limit N` for table length (0 = all) and the offline
 commands accept `--csv FILE` for the full table.
@@ -49,7 +50,7 @@ These slice an already-fetched file — no ONC calls:
 | `--group NAME` (repeatable) | broad taxon group via WoRMS lineage (`seatube groups`) |
 | `--taxon-name TAXON` (repeatable) | anything at or below this WoRMS taxon, any rank |
 | `--taxon-contains TEXT` | substring of the taxon label |
-| `--creator TEXT` / `--creator-id N` | annotator name substring / exact ONC user id |
+| `--creator TEXT` / `--creator-id N` | annotator name substring / exact ONC user id (the `user_id` column in `seatube annotators`) |
 | `--reviewed-only` | annotation appears reviewed |
 | `--min-total-reviews N` | at least N reviews |
 | `--require-comment` | has a free-text comment |
@@ -65,12 +66,12 @@ All of the above concepts plus reviewer and review-quality gates:
 |---|---|
 | `--camera-mode dive\|stationary\|both` | which sources to search |
 | `--taxonomy-code WoRMS` (default) | annotation taxonomy; empty string disables |
-| `--taxon-id a,b` | ONC-internal taxon ids (not AphiaIDs) |
+| `--taxon-id a,b` | ONC-internal taxon ids, from the `taxonId` field of fetched taxonomy entries (not AphiaIDs) |
 | `--creator-email`, `--modifier`, `--modifier-id`, `--modifier-email` | people filters |
 | `--min-positive-reviews N`, `--min-positive-review-rate 0..1` | review quality |
 | `--require-cross-review` | reviewer differs from creator |
-| `--dive-id a,b` | specific dives |
-| `--search-tree-node-id a,b`, `--location-name-contains` | specific fixed cameras |
+| `--dive-id a,b` | specific dives — ids from `seatube dives` |
+| `--search-tree-node-id a,b`, `--location-name-contains` | specific fixed cameras — ids from `seatube locations` |
 | `--max-stationary-locations N`, `--max-dives N` | scan caps |
 | `--resolution H\|L\|S` | which video resolution annotations map onto (default L) |
 | `--skip-taxon-name-resolution` | stationary only: keep ONC-internal ids, no name lookups |
