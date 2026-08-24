@@ -1,4 +1,4 @@
 onc
-argparse
 python-dateutil
 python-dotenv
+requests

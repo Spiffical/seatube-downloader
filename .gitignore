@@ -2,5 +2,8 @@
 .venv/
 downloads/
 search_results/
+images/
+.worms_cache.json
 __pycache__/
 *.pyc
+.pytest_cache/
