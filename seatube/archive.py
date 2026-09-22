@@ -42,7 +42,8 @@ def select_media_file(
     for media_file in media_files:
         if media_file.get("deviceId") == annotation_device_id:
             return media_file
-    return media_files[0]
+    # Choosing a different camera can produce convincing but unrelated labels.
+    return None
 
 
 def data_file_epoch_bounds(

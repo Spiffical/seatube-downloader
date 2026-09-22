@@ -8,11 +8,18 @@ payloads, not raw responses.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 BASE_URL = "https://data.oceannetworks.ca"
+
+
+class OncError(RuntimeError):
+    """An ONC request failed; messages deliberately omit credential-bearing URLs."""
 
 
 class OncClient:
@@ -23,9 +30,29 @@ class OncClient:
     """
 
     def __init__(self, token: Optional[str] = None, timeout_seconds: int = 45) -> None:
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
         self.token = token
         self.timeout_seconds = timeout_seconds
         self.session = requests.Session()
+        retry = Retry(total=2, backoff_factor=0.5, status_forcelist=(429, 500, 502, 503, 504),
+                      allowed_methods=frozenset({"GET", "HEAD"}), raise_on_status=False)
+        self.session.mount("https://", HTTPAdapter(max_retries=retry))
+
+    def close(self) -> None:
+        self.session.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args) -> None:
+        self.close()
+
+    def _request_error(self, path: str, exc: Exception) -> OncError:
+        response = getattr(exc, "response", None)
+        status = f"HTTP {response.status_code}" if response is not None else type(exc).__name__
+        hint = " Check your ONC_TOKEN and data access." if response is not None and response.status_code in (401, 403) else ""
+        return OncError(f"ONC request to {path} failed ({status}).{hint}")
 
     @classmethod
     def from_env(cls, timeout_seconds: int = 45) -> "OncClient":
@@ -38,7 +65,7 @@ class OncClient:
     def require_token(self) -> None:
         if not self.token:
             raise RuntimeError(
-                "An ONC token is required. Pass --token, or set ONC_TOKEN in .env "
+                "An ONC token is required. Pass token=..., or set ONC_TOKEN in .env "
                 "(register at https://data.oceannetworks.ca to get one)."
             )
 
@@ -51,18 +78,23 @@ class OncClient:
         if self.token:
             query.setdefault("token", self.token)
 
-        resp = self.session.get(
-            f"{BASE_URL}{path}",
-            params=query,
-            timeout=self.timeout_seconds,
-        )
-        resp.raise_for_status()
-        payload = resp.json()
+        try:
+            resp = self.session.get(
+                f"{BASE_URL}{path}", params=query, timeout=self.timeout_seconds,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+        except (requests.RequestException, ValueError) as exc:
+            raise self._request_error(path, exc) from None
+        if not isinstance(payload, dict):
+            raise OncError(f"ONC returned an unexpected payload for {path}; expected an object")
 
         status_code = payload.get("statusCode")
         if status_code not in (None, 0):
             msg = payload.get("message", "Unknown API error")
-            raise RuntimeError(f"{path} failed with statusCode={status_code}: {msg}")
+            if self.token:
+                msg = str(msg).replace(self.token, "[redacted]")
+            raise OncError(f"{path} failed with statusCode={status_code}: {msg}")
 
         return payload
 
@@ -161,17 +193,31 @@ class OncClient:
         impossible -- callers must budget for whole files.
         """
         self.require_token()
-        with self.session.get(
-            f"{BASE_URL}/api/archivefile/download",
-            params={"filename": filename, "token": self.token},
-            stream=True,
-            timeout=self.timeout_seconds,
-        ) as resp:
-            resp.raise_for_status()
-            with open(output_path, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        f.write(chunk)
+        target = Path(output_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(target.name + ".part")
+        path = "/api/archivefile/download"
+        try:
+            with self.session.get(
+                f"{BASE_URL}{path}", params={"filename": filename, "token": self.token},
+                stream=True, timeout=self.timeout_seconds,
+            ) as resp:
+                resp.raise_for_status()
+                written = 0
+                with temporary.open("wb") as handle:
+                    for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            handle.write(chunk)
+                            written += len(chunk)
+                expected = resp.headers.get("Content-Length")
+                if not written or (expected and not resp.headers.get("Content-Encoding")
+                                   and written != int(expected)):
+                    raise OncError(f"Incomplete archive download: {filename}")
+                temporary.replace(target)
+        except requests.RequestException as exc:
+            raise self._request_error(path, exc) from None
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def archive_file_size(self, filename: str) -> Optional[int]:
         """Size in bytes via a HEAD request, or None if unavailable."""
@@ -184,6 +230,7 @@ class OncClient:
             )
             resp.raise_for_status()
             length = resp.headers.get("Content-Length")
-            return int(length) if length else None
-        except Exception:
+            size = int(length) if length else None
+            return size if size is not None and size > 0 else None
+        except (requests.RequestException, ValueError):
             return None

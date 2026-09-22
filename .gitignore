@@ -3,6 +3,7 @@
 downloads/
 search_results/
 images/
+outputs/
 .worms_cache.json
 __pycache__/
 *.pyc
@@ -10,3 +11,7 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+clips/
+.ipynb_checkpoints/
+.ruff_cache/
+*.part

@@ -1,159 +1,83 @@
-# Reference
+# Optional CLI and data reference
 
-Commands, flags, the data model, and the two facts that shape the design.
-
-## The two facts that shape everything
-
-**1. ONC's archive endpoint serves whole files only.** It ignores HTTP Range
-headers (verified: a `Range: bytes=0-999` request returns 200 with the full
-body), and there is no still-frame data product for video. A single frame
-therefore costs one whole archive file — typically 70–200 MB for five
-minutes of video. Every download-touching command is built around minimizing
-file count, and `seatube images --dry-run` always tells you the byte cost
-before you commit.
-
-**2. The position inside a file comes from timestamps, not from
-`clipOffsetSeconds`.** ONC's `clipOffsetSeconds` locates a file within the
-device's *media series*; the seek offset inside the file is
-`annotation.startDate − archiveClipStartDate`. Confusing the two produces
-plausible, confidently wrong frames. Relatedly, an annotation whose timestamp
-falls in a recording gap maps to **no** file (`videoMappingStatus:
-no_containing_data_file`) rather than the nearest one — the old
-nearest-row behaviour silently produced false clips across gaps.
+Start with the [Python guide](guide.md) for research workflows. The CLI remains available as `seatube ...` or `python -m seatube ...`. Run a command with `--help` for all its options.
 
 ## Commands
 
-| command | needs ONC? | what it does |
+| Command | Purpose | Network |
 |---|---|---|
-| `seatube survey` | yes | which dives/locations have annotations in a date range |
-| `seatube fetch` | yes | pull filtered annotations into `downloads/annotations.json` |
-| `seatube annotators` | no | leaderboard: who annotated, how much, when, what |
-| `seatube taxa` | no | counts by taxon; `--show-groups` labels broad groups |
-| `seatube clips` | no | video files + timestamps; `--window-seconds` merges dense stretches |
-| `seatube images` | download only | extract labelled stills + index |
-| `seatube videos` | yes | download whole archive files |
-| `seatube groups` | no | the 44-group vocabulary |
-| `seatube dives` | yes | ROV dives in a date range — the source of `--dive-id` values |
-| `seatube locations` | yes | fixed-camera site ids — the source of `--search-tree-node-id` values |
+| `seatube survey` | Summarize a bulk annotation export by dive/site and annotator | ONC export |
+| `seatube fetch` | Fetch annotations and map them to archive files | ONC, and WoRMS with lineage filters |
+| `seatube dives` | Find ROV dive IDs in a date range | ONC |
+| `seatube locations` | Find fixed-camera node IDs | ONC |
+| `seatube groups` | Display the 44 group definitions | None |
+| `seatube annotators` | Summarize annotators | Local, plus WoRMS if filtering by lineage |
+| `seatube taxa` | Count taxon labels; `--show-groups` adds memberships | Local; WoRMS for lineage filters/memberships |
+| `seatube clips` | List timestamps/player links; `--window-seconds` buckets observations | Local; WoRMS for lineage filters |
+| `seatube images` | Extract JPG/PNG frames | ONC archive/size requests; optional WoRMS |
+| `seatube extract-clips` | Extract short MP4 excerpts | ONC archive/size requests; optional WoRMS |
+| `seatube videos` | Download whole archive files | ONC; optional WoRMS |
 
-Every command accepts `--limit N` for table length (0 = all) and the offline
-commands accept `--csv FILE` for the full table.
+Examples:
 
-## Filters
+```bash
+seatube fetch --start-date 2019-07-06T00:00:00Z --end-date 2019-07-06T23:59:59Z
+seatube taxa --group crabs --csv crab_taxa.csv
+seatube clips --group crabs --window-seconds 60 --csv crab_moments.csv
+seatube images --group crabs --max-images 20 --max-videos 2 --dry-run
+seatube extract-clips --group crabs --before-seconds 5 --after-seconds 10 --max-clips 5 --dry-run
+```
 
-### Offline filters (annotators / taxa / clips / images / videos)
+Omit `--dry-run` to extract media. This flag plans and optionally makes size requests, but does not download source video. The `clips` listing command is retained for compatibility; `extract-clips` writes actual video excerpts.
 
-These slice an already-fetched file — no ONC calls:
+## Shared filters
 
-| flag | matches |
+Local commands read `downloads/annotations.json` by default; override with `--annotations FILE`. They accept `--group` and `--taxon-name` (repeatable), `--taxon-contains`, `--creator`, `--creator-id`, `--reviewed-only`, `--min-total-reviews`, `--require-comment`, `--dive-name-contains`, `--location-contains`, and `--camera-mode dive|stationary`.
+
+`--worms-cache FILE` overrides the cache. `--offline-taxa` prevents WoRMS requests and warns about incomplete classification. It does not disable ONC downloads for media commands. A missing match is not proof of absence.
+
+Table commands use `--limit N` (`0` = all); annotators, taxa and clip listings accept `--csv FILE`. Media limits are separate: `--max-images`, `--max-clips`, and `--max-videos`. `--max-per-taxon` is a strict cap for frames, including co-labelled taxa. `--max-videos` caps source-file count, not bytes.
+
+Fetch options include `--camera-mode dive|stationary|both`, `--dive-id` (comma-separated), `--search-tree-node-id` (comma-separated), `--location-name-contains`, `--max-dives`, `--max-stationary-locations`, `--resolution H|L|S`, `--taxonomy-code`, `--taxonomy-id`, `--taxon-id` (ONC IDs, not AphiaIDs), people/review filters, `--flat-exports`, and `--output-dir`. Check `seatube fetch --help` for exact flags.
+
+Credentials come from `ONC_TOKEN` in the environment or `.env`. `--token` is also supported, though putting tokens in shell history is best avoided.
+
+## Annotation JSON
+
+`AnnotationSet.save()` and `seatube fetch` write a JSON list, one dictionary per observation. It remains compatible with earlier annotation exports.
+
+| Field | Meaning |
 |---|---|
-| `--group NAME` (repeatable) | broad taxon group via WoRMS lineage (`seatube groups`) |
-| `--taxon-name TAXON` (repeatable) | anything at or below this WoRMS taxon, any rank |
-| `--taxon-contains TEXT` | substring of the taxon label |
-| `--creator TEXT` / `--creator-id N` | annotator name substring / exact ONC user id (the `user_id` column in `seatube annotators`) |
-| `--reviewed-only` | annotation appears reviewed |
-| `--min-total-reviews N` | at least N reviews |
-| `--require-comment` | has a free-text comment |
-| `--dive-name-contains TEXT` | dive name |
-| `--location-contains TEXT` | fixed-camera site name/path |
-| `--camera-mode dive\|stationary` | one source only |
+| `annotationId`, `startDate`, `endDate`, `comment` | Observation identity, time, and text |
+| `taxonomy[]` | Recorded taxonomic labels and attributes |
+| `taxonomy[].taxonId` | ONC-internal taxon identifier |
+| `taxonomy[].referenceId`, `taxonUrl` | External WoRMS AphiaID / reference URL, when available |
+| `createdBy`, `modifiedBy` | People metadata; may include email addresses |
+| `toBeReviewed`, `numPositiveReviews`, `numTotalReviews` | Review signals, not independent validation |
+| `cameraMode`, `diveId`, `diveName`, `cruiseName`, `stationary*` | Source/place metadata |
+| `lat`, `lon`, `depth`, `heading` | Position/orientation when provided; depth in metres |
+| `archiveFilename`, `archiveClipStartDate`, `clipDurationSeconds` | Containing archive file and bounds |
+| `videoMappingStatus` | `strict_containment`, `no_containing_data_file`, `no_media_for_device`, or `missing_timestamp`; older records may lack a status |
+| `contextualLink` | Source moment in the SeaTube player |
 
-### Fetch-time filters (`seatube fetch`)
+Taxonomy lineages are separate in `.worms_cache.json`, keyed by WoRMS AphiaID. ONC IDs must never be used as AphiaIDs. Keep caches with the analysis for reproducibility. Check raw records for personal metadata before sharing derived datasets publicly.
 
-All of the above concepts plus reviewer and review-quality gates:
+## Archive mapping and media indexes
 
-| flag | effect |
-|---|---|
-| `--camera-mode dive\|stationary\|both` | which sources to search |
-| `--taxonomy-code WoRMS` (default) | annotation taxonomy; empty string disables |
-| `--taxon-id a,b` | ONC-internal taxon ids, from the `taxonId` field of fetched taxonomy entries (not AphiaIDs) |
-| `--creator-email`, `--modifier`, `--modifier-id`, `--modifier-email` | people filters |
-| `--min-positive-reviews N`, `--min-positive-review-rate 0..1` | review quality |
-| `--require-cross-review` | reviewer differs from creator |
-| `--dive-id a,b` | specific dives — ids from `seatube dives` |
-| `--search-tree-node-id a,b`, `--location-name-contains` | specific fixed cameras — ids from `seatube locations` |
-| `--max-stationary-locations N`, `--max-dives N` | scan caps |
-| `--resolution H\|L\|S` | which video resolution annotations map onto (default L) |
-| `--skip-taxon-name-resolution` | stationary only: keep ONC-internal ids, no name lookups |
-| `--flat-exports` | also write one-row-per-taxon CSV/JSONL |
+Video metadata describes intervals `[start, end)`; timestamps exactly at an interval’s end belong to the next interval, if any. Millisecond corrections are included. No containing interval means no media mapping. When a device ID is supplied, a different camera is never used as a substitute.
 
-## Broad taxon groups
+A seek position is `annotation start - archive file start`. `clipOffsetSeconds` is the archive’s position in a larger media series and must not be used as a seek position.
 
-`--group` accepts everyday words — `crabs`, `sponges`, `fish`, `sea-stars`,
-`octopus-and-squid`, 44 in all, plus aliases (`crab`, `starfish`, `squid`,
-`kelp`...). Each group is defined by ancestor taxa (crabs = Brachyura +
-Anomura), and an annotation matches when any of its taxa sits **at or below**
-an ancestor in the WoRMS classification. Lineages are fetched from
-marinespecies.org once per distinct taxon and cached
-(`.worms_cache.json` beside the annotations file); `--offline-taxa` forbids
-network and reports what it couldn't check.
+Images produce `images_index.csv` and `images_index.jsonl`. Columns include `image_file`, `frame_utc`, `archive_filename`, `offset_seconds`, `taxa`, `worms_aphia_ids`, `groups`, `annotation_ids`, `annotation_count`, `camera_mode`, `dive_name`, `location`, `lat`, `lon`, `depth_m`, `creators`, and `seatube_link`.
 
-The AphiaID comes from the annotation's `referenceId` or its
-`marinespecies.org` URL — never from `taxonId`, which is an ONC-internal id
-that happens to look similar.
+Clips produce `clips_index.csv` and `clips_index.jsonl`. They replace image file/time with `clip_file` and `clip_start_utc`, and add `end_seconds` (relative to the archive) and `duration_seconds`. Labels apply to observations within the excerpt, not every frame of it.
 
-## Image economics
+JSONL rows also contain the full `annotations` list. Multi-value CSV fields are semicolon-separated. Position and the quick player link summarize the first associated annotation; inspect JSONL for all observations and their individual metadata. Repeated calls preserve existing indexed media and merge provenance for the same output filename.
 
-`seatube images` plans before it downloads:
+Flat annotation exports are a different format: one row per annotation/taxon pair, with person, location, review, taxonomy and video fields. The complete column list is `seatube.annotations.FLAT_EXPORT_COLUMNS`.
 
-1. annotations collapse into frames (same file + same instant;
-   `--dedupe-seconds` widens the merge window),
-2. frames group into the archive files that contain them,
-3. files are visited **richest-first**, so `--max-images 4` is satisfied by
-   one download when one file holds four wanted frames.
+## Operational limits
 
-Caps: `--max-images` (stop after N stills), `--max-videos` (hard byte
-budget: never fetch more than N files), `--max-per-taxon` (balanced sets).
-Each archive file is deleted right after its frames are extracted unless
-`--keep-videos`. Re-runs skip existing images entirely.
+The download endpoint is treated as a whole-file service. This package does not rely on HTTP range requests. File sizes may be unknown; plans use estimates and cannot guarantee a total byte budget. Cache reuse trusts existing nonempty files; remove damaged legacy cache files before retrying.
 
-Output format: `--image-format jpg|png`, `--jpeg-quality N`
-(ffmpeg `-q:v`, 2 ≈ near-lossless).
-
-## Data model
-
-`seatube fetch` writes `downloads/annotations.json`: a list of records, one
-per annotation. The interesting fields:
-
-| field | meaning |
-|---|---|
-| `annotationId`, `startDate`, `endDate`, `comment` | the observation |
-| `taxonomy[]` | taxa: `displayText`, `taxonId` (ONC-internal), `referenceId` (WoRMS AphiaID), `taxonUrl`, attributes (e.g. Count) |
-| `createdBy` / `modifiedBy` | annotator / reviewer (`userId`, name, email) |
-| `toBeReviewed`, `numPositiveReviews`, `numTotalReviews` | review state |
-| `cameraMode`, `diveId`/`diveName`/`cruiseName` or `stationary*` | provenance |
-| `lat`, `lon`, `depth`, `heading` | position |
-| `archiveFilename`, `archiveClipStartDate`, `clipDurationSeconds` | the video file containing the instant |
-| `videoMappingStatus` | `strict_containment` or `no_containing_data_file` |
-| `contextualLink` | opens the exact moment in the SeaTube player |
-
-### Archive-file mapping
-
-For each annotation, ONC's video metadata for the dive/device is searched
-for the one `dataFiles` row whose `[start, end)` interval contains the
-annotation timestamp (millisecond corrections included). No containing row →
-no mapping, explicitly. The archive filename is reconstructed as
-`{deviceCode}_{clipStartUTC}{postfix}` exactly as ONC names it.
-
-### Image index
-
-`seatube images` writes `images_index.csv` (one row per image) and
-`images_index.jsonl` (same rows plus the full annotation records):
-`image_file, frame_utc, archive_filename, offset_seconds, taxa,
-worms_aphia_ids, groups, annotation_ids, annotation_count, camera_mode,
-dive_name, location, lat, lon, depth_m, creators, seatube_link`.
-
-### Flat exports
-
-`seatube fetch --flat-exports` writes `annotations_flat.csv` / `.jsonl` with
-one row per (annotation, taxon) pair — 54 columns covering everything above,
-ready for pandas.
-
-## Known limits
-
-- Annotations are whole-frame labels: no bounding boxes, and unannotated
-  organisms may appear in frame.
-- The animal is present at the annotation instant but may be off-centre or
-  partly out of view as the ROV moves; `--keep-videos` lets you re-pick
-  frames by hand.
-- `resolution` L is a good default; H files are much larger, S much smaller.
+Some metadata endpoints are used by the SeaTube web application rather than documented as stable public APIs. Endpoint failures raise errors during fetches; empty results from successful requests still require checking your query scope. The offline test suite cannot guarantee live service availability.

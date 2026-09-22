@@ -6,20 +6,21 @@
     taxa        what was annotated, counts by taxon
     clips       video files + timestamps for chosen annotations
     images      extract labelled still images
+    extract-clips extract short MP4 excerpts
     videos      download whole archive video files
     groups      the broad taxon-group vocabulary
     dives       ROV dives in a date range, with their ids
     locations   fixed-camera location ids
 
-``fetch`` is the only command that must query ONC; everything below it works
-offline on the fetched file, so you can slice one fetch many ways for free.
+Local exploration uses saved annotations. Lineage matching may query WoRMS;
+metadata discovery, size estimates and media downloads use ONC.
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
-import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -27,9 +28,10 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from .annotations import AnnotationSet, ReviewFilters
 from .client import OncClient
+from .clips import ClipDownloader
 from .archive import parse_iso_utc
 from .fetch import AnnotationFetcher, FetchFilters, dives_in_range, fixed_camera_locations
-from .images import ImageDownloader, build_frames, select_frames
+from .images import ImageDownloader, archive_path, build_frames, select_frames, validate_limit
 from .taxonomy import WormsResolver, format_group_table, normalize_group_name
 
 DEFAULT_ANNOTATIONS = "downloads/annotations.json"
@@ -119,8 +121,6 @@ def apply_offline_filters(annotations: AnnotationSet, args: argparse.Namespace) 
         resolver=resolver,
     )
     resolver.save()
-    if resolver.unresolved:
-        print(f"[WARN] {len(resolver.unresolved)} taxa could not be resolved and were skipped")
     if len(result) != len(annotations):
         print(f"{len(result)} annotations pass the filters")
     return result
@@ -363,6 +363,7 @@ def cmd_videos(args: argparse.Namespace) -> int:
     client.require_token()
     annotations = apply_offline_filters(load_annotations(args), args)
     filenames = sorted({a.archive_filename for a in annotations if a.archive_filename})
+    validate_limit("max_files", args.max_files)
     if args.max_files is not None:
         filenames = filenames[: args.max_files]
     if not filenames:
@@ -372,15 +373,26 @@ def cmd_videos(args: argparse.Namespace) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"{len(filenames)} archive file(s) to download into {out_dir}")
     for i, name in enumerate(filenames, start=1):
-        path = out_dir / name
+        path = archive_path(out_dir, name)
         if path.exists() and path.stat().st_size > 1_000_000:
             print(f"[{i}/{len(filenames)}] exists, skipping: {name}")
             continue
         print(f"[{i}/{len(filenames)}] downloading {name}")
-        try:
-            client.download_archive_file(name, str(path))
-        except Exception as exc:
-            print(f"[WARN] failed: {exc}")
+        client.download_archive_file(name, str(path))
+    return 0
+
+
+def cmd_extract_clips(args: argparse.Namespace) -> int:
+    annotations = apply_offline_filters(load_annotations(args), args)
+    clips = annotations.clips(before_seconds=args.before_seconds, after_seconds=args.after_seconds,
+                              max_clips=args.max_clips, max_videos=args.max_videos)
+    client = OncClient(args.token, timeout_seconds=args.timeout_seconds)
+    downloader = ClipDownloader(client, args.output_dir, video_dir=args.video_dir,
+                                keep_videos=args.keep_videos, resolver=make_resolver(args))
+    if args.dry_run:
+        print(downloader.describe_plan(clips))
+    else:
+        downloader.download(clips)
     return 0
 
 
@@ -534,6 +546,23 @@ def build_parser() -> argparse.ArgumentParser:
     common(p)
     p.set_defaults(func=cmd_images)
 
+    p = sub.add_parser("extract-clips", help="extract short MP4 excerpts around annotations")
+    add_annotations_arg(p)
+    add_offline_filter_args(p)
+    p.add_argument("--before-seconds", type=float, default=5)
+    p.add_argument("--after-seconds", type=float, default=5)
+    p.add_argument("--max-clips", type=int)
+    p.add_argument("--max-videos", type=int)
+    p.add_argument("--output-dir", default="clips")
+    p.add_argument("--video-dir")
+    p.add_argument("--keep-videos", action="store_true")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--worms-cache")
+    p.add_argument("--offline-taxa", action="store_true")
+    p.add_argument("--timeout-seconds", type=int, default=600)
+    common(p)
+    p.set_defaults(func=cmd_extract_clips)
+
     # videos
     p = sub.add_parser("videos", help="download whole archive video files")
     add_annotations_arg(p)
@@ -563,6 +592,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     parser = build_parser()
     args = parser.parse_args(argv)
     if hasattr(args, "group"):
@@ -572,6 +602,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except KeyboardInterrupt:
         print("\nInterrupted.")
         return 130
+    except (RuntimeError, ValueError, OSError) as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
