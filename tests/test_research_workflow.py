@@ -308,3 +308,56 @@ def test_real_ffmpeg_frames_clips_and_repeat_download(tmp_path):
     assert not (tmp_path / "clips" / "_videos").exists()
     record = json.loads((tmp_path / "clips" / "clips_index.jsonl").read_text())
     assert len(record["annotations"]) == 2
+
+
+def people_data():
+    def person(uid, name):
+        return {"userId": uid, "firstName": name, "lastName": "", "email": "private@example.test"}
+    return AnnotationSet([
+        annotation(id=1, createdBy=person(1, "Alex"), modifiedBy=person(2, "Blair")),
+        annotation(3, id=2, createdBy=person(1, "Alex renamed"), modifiedBy=person(1, "Alex")),
+        annotation(4, id=3, createdBy=person(2, "Blair"), modifiedBy=person(3, "Alex")),
+        annotation(5, id=4, createdBy=person(3, "Alex"), modifiedBy=None),
+        annotation(6, id=5, createdBy=None, modifiedBy=None),
+    ])
+
+
+def test_people_discovery_uses_stable_ids_and_separates_roles():
+    data = people_data()
+    authors = data.people_summary()
+    assert authors[0] == {"user_id": 1, "name": "Alex", "annotations": 2}
+    assert {p["user_id"] for p in authors if p["name"] == "Alex"} == {1, 3}
+    editors = {p["user_id"]: p for p in data.people_summary("modifier")}
+    assert editors[None]["annotations"] == 2
+    assert editors[1]["annotations"] == 1
+    assert all("email" not in p for p in authors)
+    assert sum(p["annotations"] for p in authors) == len(data)
+    assert data.filter(creator_ids=[2]).people_summary() == [
+        {"user_id": 2, "name": "Blair", "annotations": 1}]
+    with pytest.raises(ValueError, match="last editor"):
+        data.people_summary("reviewer")
+
+
+def test_people_filters_union_within_role_intersect_between_roles():
+    data = people_data()
+    assert [a.id for a in data.filter(creator_ids=[1, 2])] == [1, 2, 3]
+    assert [a.id for a in data.filter(creator_ids=[1, 2], modifier_ids=[2, 3])] == [1, 3]
+    assert [a.id for a in data.filter(creator_ids=[1, 2], creator_id=2)] == [3]
+    assert [a.id for a in data.filter(modifier_ids=[2], modifier_id=3)] == []
+    assert [a.id for a in data.search("crabs", creator_ids=[2], resolver=resolver())] == [3]
+    assert [a.id for a in data.filter(modifier_ids=[3])] == [3]
+
+
+def test_empty_people_selection_never_accidentally_selects_everyone():
+    data = people_data()
+    assert len(data.filter(creator_ids=None, modifier_ids=None)) == len(data)
+    assert not data.filter(creator_ids=[])
+    assert not data.filter(modifier_ids=[])
+    assert not data.filter(creator_ids=[999])
+    assert not data.filter(creator_ids=[]).people_summary()
+
+
+@pytest.mark.parametrize("values", ["Alex", ["1"], [True], [1, True], [0]])
+def test_people_filters_reject_names_and_invalid_ids(values):
+    with pytest.raises(ValueError, match="ONC user IDs"):
+        people_data().filter(creator_ids=values)

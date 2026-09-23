@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add author/last-editor discovery and selection by one or several user IDs, with a real crab example that carries the people filters through media planning and exports. Distinguish last editors from confirmed expert reviewers.
+
 - Replace the synthetic notebook tutorial with a live ONC workflow, direct registration/profile links, private `.env` token loading, and optional frame/clip extraction from one shared archive.
 - Separate credential-free notebook validation in CI from explicit local execution against ONC; keep executed results under ignored downloads.
 - Remove the synthetic public example dataset and simplify the README.

@@ -78,12 +78,21 @@ crabs = sea.search(annotations, "crabs")
 # Also accepts ["sponges", "sea-stars"], "Sebastes", or a species name.
 print(crabs.taxon_summary())
 
+# List the people who left crab annotations, then choose one or more IDs.
+authors = crabs.people_summary("creator")
+print("Authors:", authors)
+print("Last editors:", crabs.people_summary("modifier"))
+author_ids = [p["user_id"] for p in authors if p["user_id"] is not None]
+crabs = crabs.filter(creator_ids=author_ids[:1])  # first author; use [:2] for two
+
 frames = crabs.frames(max_images=20, max_videos=2)
 images = sea.image_downloader("outputs/crab_frames", keep_videos=True)
 print(images.describe_plan(frames))  # estimates cost; no video download
 ```
 
 Fetches retrieve metadata only. ROV dives are the default; select fixed cameras with `camera_mode="stationary"`, or both sources with `"both"`. Use `sea.dives(...)` and `sea.locations()` to discover IDs. The [guide](docs/guide.md) covers date, place, depth, annotator, and review filters.
+
+`people_summary()` lists people in the current selection, with names, IDs, and counts. `creator_ids=[...]` filters annotation authors; `modifier_ids=[...]` filters last editors. Use `None` to leave a role unrestricted. Last editors are not necessarily reviewers, and these records do not provide a complete named reviewer history. The [notebook](examples/research_walkthrough.ipynb) demonstrates both filters on crab annotations and shows each record's author and last editor.
 
 ## Extract frames or clips
 

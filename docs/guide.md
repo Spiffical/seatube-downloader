@@ -103,6 +103,36 @@ Additional filters include `creator`, `creator_id`, `dive_contains`, `location_c
 
 The results retain each entire source annotation, including co-labelled taxa. Matching a crab does not mean every returned taxon label is a crab. Review fields are useful quality signals, but “reviewed” does not establish identification accuracy. `require_cross_review` checks for different creator/modifier IDs; it is only a proxy, not a reviewer-history audit.
 
+### Find people and filter their crab annotations
+
+Use `annotations.people_summary()` for the full fetched dataset, or call it on `crabs` to list only people associated with crab observations:
+
+```python
+crabs = sea.search(annotations, "crabs")
+authors = crabs.people_summary(role="creator")
+editors = crabs.people_summary(role="modifier")
+for person in authors:
+    print(person["user_id"], person["name"], person["annotations"])
+for person in editors:
+    print("Last editor:", person["user_id"], person["name"], person["annotations"])
+
+# Inspect attribution on individual observations.
+for annotation in crabs[:5]:
+    print(annotation.id, annotation.creator_name, annotation.modifier_name)
+
+# Choose IDs from the tables. These examples select the first listed people.
+author_ids = [p["user_id"] for p in authors if p["user_id"] is not None]
+editor_ids = [p["user_id"] for p in editors if p["user_id"] is not None]
+one_author = crabs.filter(creator_ids=author_ids[:1])
+two_authors = crabs.filter(creator_ids=author_ids[:2])
+one_last_editor = crabs.filter(modifier_ids=editor_ids[:1])
+crabs = one_author  # The frame/clip examples below now use this person's annotations.
+```
+
+The lists are scoped to this dataset, not a global ONC user directory. A list of IDs selects any matching person; author/editor fields combine with AND. `None` imposes no constraint, whereas `[]` intentionally returns no matches. Names can also be searched with `creator=` or `modifier=`, but IDs avoid name ambiguity.
+
+For “who left this annotation?”, use **creator**. ONC defines **Modified By** as the last editor; that person need not have performed expert review. These returned records do not include a complete reviewer list. Combining `modifier_ids` with `ReviewFilters(reviewed_only=True)` means “reviewed records last edited by these people,” not “reviews performed by these people.” See [ONC's annotation field descriptions](https://wiki.oceannetworks.ca/pages/viewpage.action?pageId=140247051).
+
 ## 6. Plan and extract frames
 
 ```python
