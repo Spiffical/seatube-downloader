@@ -1,6 +1,6 @@
 # Find organisms, frames, and clips with Python
 
-This guide is for researchers using a notebook or a Python script. First install the package and configure an ONC token as described in the [README](../README.md). You only need ffmpeg when extracting media. The [notebook](../examples/research_walkthrough.ipynb) also provides a completely offline introduction.
+This guide is for researchers using a notebook or a Python script. First install the package and configure an ONC token as described in the [README](../README.md). You only need ffmpeg when extracting media. The [notebook](../examples/research_walkthrough.ipynb) walks through a real dive, starting with ONC registration and token setup. It queries live metadata by default; media downloads are optional.
 
 ## 1. Choose your biological search
 

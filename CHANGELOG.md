@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Replace the synthetic notebook tutorial with a live ONC workflow, direct registration/profile links, private `.env` token loading, and optional frame/clip extraction from one shared archive.
+- Separate credential-free notebook validation in CI from explicit local execution against ONC; keep executed results under ignored downloads.
+- Remove the synthetic public example dataset and simplify the README.
+
 ## 0.3.0
 
 - Make Python the primary documented workflow with `SeaTube`, common-name/scientific-name search, catalog discovery, and a runnable offline notebook.
