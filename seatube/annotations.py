@@ -395,9 +395,11 @@ class AnnotationSet:
         taxon_contains: Optional[str] = None,
         creator: Optional[str] = None,
         creator_id: Optional[int] = None,
+        creator_ids: Optional[Sequence[int]] = None,
         creator_email: Optional[str] = None,
         modifier: Optional[str] = None,
         modifier_id: Optional[int] = None,
+        modifier_ids: Optional[Sequence[int]] = None,
         modifier_email: Optional[str] = None,
         review: Optional[ReviewFilters] = None,
         require_comment: bool = False,
@@ -419,6 +421,17 @@ class AnnotationSet:
         from .taxonomy import wanted_ancestor_names
 
         wanted = wanted_ancestor_names(groups, taxa)
+        people_ids = {}
+        for name, values in (("creator_ids", creator_ids), ("modifier_ids", modifier_ids)):
+            if values is None:
+                people_ids[name] = None
+                continue
+            if isinstance(values, (str, bytes)):
+                raise ValueError(f"{name} must be a sequence of integer ONC user IDs")
+            if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0
+                   for value in values):
+                raise ValueError(f"{name} must contain positive integer ONC user IDs")
+            people_ids[name] = set(values)
         if camera_mode not in (None, "dive", "stationary"):
             raise ValueError("camera_mode must be 'dive' or 'stationary'")
         start = parse_iso_utc(start_date) if start_date else None
@@ -438,6 +451,10 @@ class AnnotationSet:
 
         kept: List[Annotation] = []
         for ann in self.annotations:
+            if people_ids["creator_ids"] is not None and ann.creator_id not in people_ids["creator_ids"]:
+                continue
+            if people_ids["modifier_ids"] is not None and ann.modifier_id not in people_ids["modifier_ids"]:
+                continue
             if start or end:
                 if ann.start is None or (start and ann.start < start) or (end and ann.start > end):
                     continue
@@ -569,6 +586,32 @@ class AnnotationSet:
                             max_clips=max_clips, max_videos=max_videos)
 
     # -- summaries ----------------------------------------------------------------
+
+    def people_summary(self, role: str = "creator") -> List[Dict[str, Any]]:
+        """List people recorded on this set, with IDs and annotation counts.
+
+        ``creator`` means annotation author; ``modifier`` means last editor,
+        not a confirmed reviewer or a complete review history. No network
+        requests are made and email addresses are not included. Missing IDs
+        are reported as None and cannot be selected through the ID filters.
+        """
+        if role not in {"creator", "modifier"}:
+            raise ValueError("role must be 'creator' (author) or 'modifier' (last editor)")
+        people: Dict[Any, Dict[str, Any]] = {}
+        for ann in self:
+            user_id = getattr(ann, role + "_id")
+            name = getattr(ann, role + "_name") or "unknown"
+            # A stable ID takes precedence over name spelling. Without an ID,
+            # retain separately named entries rather than merging everyone.
+            key = ("id", user_id) if user_id is not None else ("name", name)
+            if key not in people:
+                people[key] = {"user_id": user_id, "name": name, "annotations": 0}
+            entry = people[key]
+            if entry["name"] == "unknown" and name != "unknown":
+                entry["name"] = name
+            entry["annotations"] += 1
+        return sorted(people.values(), key=lambda p: (-p["annotations"], p["name"],
+                                                      p["user_id"] if p["user_id"] is not None else -1))
 
     def annotator_summary(self) -> List[AnnotatorStats]:
         """Who annotated, how much, when, and what -- sorted by volume."""

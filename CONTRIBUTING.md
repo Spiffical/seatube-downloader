@@ -24,7 +24,16 @@ Do not weaken containment or silently ignore upstream failures to obtain more re
 
 When changing the organism vocabulary, update `TAXON_GROUPS` / `GROUP_ALIASES` and regenerate the catalog with `python scripts/update_organism_docs.py`. Explain broad common-name meanings and overlapping groups. A new catalog entry is not a claim of data availability.
 
-Run `examples/offline_workflow.py` and the notebook before changing the documented API. The notebook defaults to synthetic records; online steps are disabled by explicit switches. Preserve that default. See [examples/data/README.md](examples/data/README.md) for the fixture provenance.
+The research notebook uses real ONC data and requires an ONC token. CI checks notebook structure and Python syntax without credentials; it does not claim live-service coverage. Before changing the notebook workflow, verify it locally:
+
+```bash
+python -m pip install nbformat nbclient ipykernel
+python scripts/check_notebook.py                            # structure/syntax only
+python scripts/check_notebook.py --execute                  # live metadata and taxonomy
+python scripts/check_notebook.py --execute --download-media # also extract from one real archive
+```
+
+Use `--env-file /path/to/private/.env` with `--execute` to select a token file. The token is passed privately to the kernel, never embedded in notebook source. Execution saves a notebook with real results to ignored `downloads/research_walkthrough/verified.ipynb`. Commit the source notebook with cleared outputs. Keep `DOWNLOAD_MEDIA=False` as the user-facing default; extraction is an explicit choice after reviewing the plan. Test fixtures in the unit suite remain generated and offline.
 
 ## Reporting a problem
 

@@ -38,6 +38,7 @@ Load with `AnnotationSet.load(path)` or construct from raw dictionaries with `An
 | `filter(**filters)` | Explicit filtering; see below |
 | `group_summary(resolver=None, include_empty=False)` | Per-group `annotations`, `mapped_annotations`, `archive_files`, `taxa`, and catalog definition |
 | `taxon_summary(resolver=None)` | `TaxonStats` dataclasses; distinct annotation count per recorded label |
+| `people_summary(role="creator")` | Names, ONC user IDs and annotation counts; role `"modifier"` lists last editors, not confirmed reviewers |
 | `annotator_summary()` | `AnnotatorStats` dataclasses; attribution and observation summaries |
 | `frames(dedupe_seconds=0, max_images=None, max_videos=None, max_per_taxon=None)` | Planned `Frame` objects, no network |
 | `clips(before_seconds=5, after_seconds=5, max_clips=None, max_videos=None)` | Planned `Clip` objects, no network |
@@ -48,13 +49,28 @@ Load with `AnnotationSet.load(path)` or construct from raw dictionaries with `An
 `filter()` accepts:
 
 - **Taxonomy:** `groups`, `taxa` (ancestor/scientific names), `taxon_contains` (label substring), `aphia_ids` (exact external IDs, no descendant expansion), `resolver`.
-- **People:** `creator`, `creator_id`, `creator_email`, `modifier`, `modifier_id`, `modifier_email`. Names/emails use substring matching; IDs are exact.
+- **People:** `creator`, `creator_id`, `creator_ids`, `creator_email`, `modifier`, `modifier_id`, `modifier_ids`, `modifier_email`. Names/emails use substring matching; IDs are exact. The plural ID filters accept a sequence of positive integer IDs, matching any within that list; `None` disables that filter and `[]` selects nothing. Author and last-editor conditions combine with AND, including when singular and plural ID filters are both supplied.
 - **Place/time:** `dive_contains`, `location_contains` (fixed-camera name/path), `camera_mode`, `start_date`, `end_date`, `min_depth_m`, `max_depth_m`.
 - **Quality:** `review=ReviewFilters(...)`, `require_comment`.
 
 Within `groups` and `taxa`, names form a union. Other fields combine with AND; matching retains whole annotations, including their other taxa. Date and depth bounds are inclusive; missing measurements fail an active bound. Naive dates/timestamps are interpreted as UTC.
 
 `ReviewFilters` accepts `reviewed_only=False`, `min_total_reviews=None`, `min_positive_reviews=None`, `min_positive_review_rate=None` (0–1), and `require_cross_review=False`. The last field compares creator and modifier IDs and is only a review proxy.
+
+`people_summary()` runs locally on the current dataset or subset and omits emails. The `creator` role identifies authors; `modifier` identifies last editors. Missing IDs appear as `None` in summaries and cannot be selected through the plural ID filters. Names can be ambiguous; prefer discovered IDs. The returned metadata does not contain a complete named reviewer history, so a modifier match is not proof of expert review.
+
+```python
+crabs = sea.search(annotations, "crabs")
+authors = crabs.people_summary("creator")
+editors = crabs.people_summary("modifier")
+author_ids = [p["user_id"] for p in authors if p["user_id"] is not None]
+editor_ids = [p["user_id"] for p in editors if p["user_id"] is not None]
+by_author = crabs.filter(creator_ids=author_ids[:1])
+by_either_author = crabs.filter(creator_ids=author_ids[:2])
+by_last_editor = crabs.filter(modifier_ids=editor_ids[:1])
+```
+
+These plural ID filters apply to `AnnotationSet.filter()` and `SeaTube.search()`. Fetch-time filters below retain the singular `creator_id` and `modifier_id` fields; fetch metadata once and filter locally to select multiple people.
 
 ## Fetch configuration and lower-level access
 
