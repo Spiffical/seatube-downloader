@@ -1,14 +1,15 @@
 """Annotation records and the operations you do on a set of them.
 
 ``AnnotationSet`` is the package's central object: everything downstream of a
-fetch -- filtering, annotator leaderboards, taxon counts, clip listings, ML
-exports, image extraction -- runs off one of these, entirely offline.
+fetch -- filtering, summaries, clip listings and exports -- runs off one of
+these. Lineage matching may call WoRMS unless a resolver uses offline=True.
 """
 
 from __future__ import annotations
 
 import csv
 import json
+import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -206,10 +207,10 @@ class Annotation:
             rel = (parse_iso_utc(start) - parse_iso_utc(clip_start)).total_seconds()
         except (ValueError, TypeError):
             return None
-        if rel < 0:
+        if not math.isfinite(rel) or rel < 0:
             return None
         duration = self.clip_duration_seconds
-        if duration is not None and rel >= duration:
+        if duration is not None and (not math.isfinite(duration) or rel >= duration):
             return None
         return rel
 
@@ -269,6 +270,15 @@ class ReviewFilters:
     min_positive_reviews: Optional[int] = None
     min_positive_review_rate: Optional[float] = None
     require_cross_review: bool = False
+
+    def __post_init__(self) -> None:
+        for name in ("min_total_reviews", "min_positive_reviews"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, int) or value < 0):
+                raise ValueError(f"{name} must be a non-negative integer")
+        rate = self.min_positive_review_rate
+        if rate is not None and not 0 <= rate <= 1:
+            raise ValueError("min_positive_review_rate must be between 0 and 1")
 
     def matches(self, ann: Annotation) -> bool:
         if self.reviewed_only and ann.is_reviewed is not True:
@@ -343,12 +353,16 @@ class AnnotationSet:
 
     @classmethod
     def load(cls, path: str) -> "AnnotationSet":
-        return cls(json.loads(Path(path).read_text()))
+        records = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(records, list) or not all(isinstance(r, dict) for r in records):
+            raise ValueError("Expected a JSON list of annotation records")
+        return cls(records)
 
     def save(self, path: str) -> None:
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps([a.raw for a in self.annotations], indent=2, ensure_ascii=False))
+        p.write_text(json.dumps([a.raw for a in self.annotations], indent=2, ensure_ascii=False),
+                     encoding="utf-8")
 
     # -- container protocol ----------------------------------------------------
 
@@ -359,7 +373,13 @@ class AnnotationSet:
         return iter(self.annotations)
 
     def __getitem__(self, index: int) -> Annotation:
+        if isinstance(index, slice):
+            return AnnotationSet(self.annotations[index])
         return self.annotations[index]
+
+    def __repr__(self) -> str:
+        mapped = sum(a.offset_in_file_seconds() is not None for a in self)
+        return f"AnnotationSet({len(self)} annotations, {mapped} mapped to video)"
 
     @property
     def records(self) -> List[Dict[str, Any]]:
@@ -384,6 +404,11 @@ class AnnotationSet:
         dive_contains: Optional[str] = None,
         location_contains: Optional[str] = None,
         camera_mode: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        min_depth_m: Optional[float] = None,
+        max_depth_m: Optional[float] = None,
+        aphia_ids: Sequence[int] = (),
         resolver: Optional[WormsResolver] = None,
     ) -> "AnnotationSet":
         """Return the annotations passing every given condition.
@@ -394,11 +419,41 @@ class AnnotationSet:
         from .taxonomy import wanted_ancestor_names
 
         wanted = wanted_ancestor_names(groups, taxa)
+        if camera_mode not in (None, "dive", "stationary"):
+            raise ValueError("camera_mode must be 'dive' or 'stationary'")
+        start = parse_iso_utc(start_date) if start_date else None
+        end = parse_iso_utc(end_date) if end_date else None
+        if start and end and end < start:
+            raise ValueError("end_date must be on or after start_date")
+        for depth in (min_depth_m, max_depth_m):
+            if depth is not None and not math.isfinite(depth):
+                raise ValueError("Depth bounds must be finite")
+        if min_depth_m is not None and max_depth_m is not None and min_depth_m > max_depth_m:
+            raise ValueError("max_depth_m must be at least min_depth_m")
+        ids = {int(i) for i in aphia_ids}
         if wanted and resolver is None:
             resolver = WormsResolver(None)
+        if wanted:
+            resolver.unresolved.clear()
 
         kept: List[Annotation] = []
         for ann in self.annotations:
+            if start or end:
+                if ann.start is None or (start and ann.start < start) or (end and ann.start > end):
+                    continue
+            if min_depth_m is not None or max_depth_m is not None:
+                try:
+                    depth = float(ann.depth_m)
+                except (TypeError, ValueError):
+                    continue
+                if not math.isfinite(depth):
+                    continue
+                if min_depth_m is not None and depth < min_depth_m:
+                    continue
+                if max_depth_m is not None and depth > max_depth_m:
+                    continue
+            if ids and not any(t.aphia_id in ids for t in ann.taxa):
+                continue
             if camera_mode and ann.camera_mode != camera_mode:
                 continue
             if not person_matches(ann.creator, creator_id, creator, creator_email):
@@ -431,7 +486,87 @@ class AnnotationSet:
 
         result = AnnotationSet([])
         result.annotations = kept
+        if wanted:
+            resolver.save()
+            resolver.warn_unresolved()
         return result
+
+    def search(self, organisms: Sequence[str], *, resolver=None, **filters) -> "AnnotationSet":
+        """Find one or more groups/aliases or scientific names (OR semantics).
+
+        Other filters are combined with AND. Scientific names are matched
+        against annotation labels and WoRMS ancestors, not fuzzy text.
+        """
+        from .taxonomy import search_terms
+
+        groups, taxa = search_terms(organisms)
+        if not groups and not taxa:
+            raise ValueError("Provide at least one organism")
+        return self.filter(groups=groups, taxa=taxa, resolver=resolver, **filters)
+
+    def summary(self) -> Dict[str, Any]:
+        """Dataset coverage and mapping diagnostics; never calls the network."""
+        times = [a.start for a in self if a.start is not None]
+        mapped = [a for a in self if a.offset_in_file_seconds() is not None]
+        return {
+            "annotations": len(self),
+            "mapped_annotations": len(mapped),
+            "unmapped_annotations": len(self) - len(mapped),
+            "archive_files": len({a.archive_filename for a in mapped}),
+            "taxon_labels": len({t for a in self for t in a.taxon_labels}),
+            "places": sorted({a.place for a in self}),
+            "first_utc": min(times).isoformat() if times else None,
+            "last_utc": max(times).isoformat() if times else None,
+        }
+
+    def group_summary(self, resolver=None, *, include_empty: bool = False) -> List[Dict[str, Any]]:
+        """Observed annotation counts per group; overlapping groups are not additive.
+
+        Counts are observations, not individuals or abundance. Unresolved
+        classifications issue IncompleteTaxonomyWarning.
+        """
+        from .taxonomy import organism_groups
+
+        resolver = resolver or WormsResolver(None)
+        resolver.unresolved.clear()
+        groups = {r["group"]: {**r, "annotations": 0, "mapped_annotations": 0,
+                               "taxa": set(), "archive_files": set()}
+                  for r in organism_groups()}
+        resolved = {}
+        for ann in self:
+            membership = defaultdict(set)
+            for taxon in ann.taxa:
+                key = json.dumps(taxon.raw, sort_keys=True)
+                if key not in resolved:
+                    resolved[key] = resolver.groups_for(taxon.raw)
+                for group in resolved[key]:
+                    membership[group].add(taxon.primary_name)
+            for group, labels in membership.items():
+                row = groups[group]
+                row["annotations"] += 1
+                row["taxa"].update(labels)
+                if ann.offset_in_file_seconds() is not None:
+                    row["mapped_annotations"] += 1
+                    row["archive_files"].add(ann.archive_filename)
+        resolver.save()
+        resolver.warn_unresolved()
+        return sorted([
+            {**r, "taxa": sorted(r["taxa"]), "archive_files": len(r["archive_files"])}
+            for r in groups.values() if include_empty or r["annotations"]
+        ], key=lambda r: (-r["annotations"], r["group"]))
+
+    def frames(self, *, dedupe_seconds: float = 0.0, **limits):
+        """Plan still frames; no downloads. See build_frames and select_frames."""
+        from .images import build_frames, select_frames
+        return select_frames(build_frames(self, dedupe_seconds=dedupe_seconds), **limits)
+
+    def clips(self, *, before_seconds: float = 5, after_seconds: float = 5,
+              max_clips=None, max_videos=None):
+        """Plan bounded, merged video excerpts around annotation instants."""
+        from .clips import build_clips, select_clips
+        return select_clips(build_clips(self, before_seconds=before_seconds,
+                                       after_seconds=after_seconds),
+                            max_clips=max_clips, max_videos=max_videos)
 
     # -- summaries ----------------------------------------------------------------
 
@@ -467,8 +602,12 @@ class AnnotationSet:
         """What was annotated and how often -- sorted by count."""
         stats: Dict[str, TaxonStats] = {}
         for ann in self.annotations:
+            seen = set()
             for taxon in ann.taxa:
                 name = taxon.primary_name
+                if name in seen:
+                    continue
+                seen.add(name)
                 entry = stats.get(name)
                 if entry is None:
                     entry = TaxonStats(name=name, aphia_id=taxon.aphia_id)
@@ -488,6 +627,8 @@ class AnnotationSet:
         the same archive file are merged into one row -- useful for finding
         dense stretches worth watching.
         """
+        if not math.isfinite(window_seconds) or window_seconds < 0:
+            raise ValueError("window_seconds must be finite and non-negative")
         rows: Dict[Tuple[str, float], Dict[str, Any]] = {}
         for ann in self.annotations:
             offset = ann.offset_in_file_seconds()
@@ -597,9 +738,13 @@ class AnnotationSet:
                     "taxonomy_id": taxonomy_id,
                     "taxon_id": taxon_id,
                     "taxon_display_text": taxon_display,
+                    "taxon_scientific_name": (taxon.get("scientificName") or taxon.get("taxonName")
+                                              or taxon.get("validName") or taxon.get("acceptedName")) if taxon else None,
+                    "worms_aphia_id": aphia_id_from_taxon(taxon) if taxon else None,
                     "taxon_url": taxon_url,
                     "taxon_attributes_json": json.dumps(attributes, ensure_ascii=False),
                     "archive_filename": ann.get("archiveFilename"),
+                    "video_mapping_status": ann.get("videoMappingStatus"),
                     "video_resolution_code": ann.get("resolution"),
                     "video_device_code": ann.get("videoDeviceCode"),
                     "clip_offset_seconds": ann.get("clipOffsetSeconds"),
@@ -643,8 +788,8 @@ FLAT_EXPORT_COLUMNS = [
     "lat", "lon", "depth_m", "heading_deg",
     "to_be_reviewed", "num_positive_reviews", "num_total_reviews",
     "taxonomy_index", "taxonomy_code", "taxonomy_id", "taxon_id",
-    "taxon_display_text", "taxon_url", "taxon_attributes_json",
-    "archive_filename", "video_resolution_code", "video_device_code",
+    "taxon_display_text", "taxon_scientific_name", "worms_aphia_id", "taxon_url", "taxon_attributes_json",
+    "archive_filename", "video_mapping_status", "video_resolution_code", "video_device_code",
     "clip_offset_seconds", "clip_duration_seconds", "clip_relative_path",
     "clip_row_start_offset_seconds", "archive_clip_start_utc",
     "video_local_path", "video_downloaded", "contextual_link",

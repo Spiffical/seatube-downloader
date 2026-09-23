@@ -3,15 +3,17 @@
 This is the expensive, online half of the package: it walks dives or fixed
 cameras, applies the filters, and stamps every kept annotation with the
 archive file that truly contains its timestamp.  Everything after it --
-summaries, clip listings, image extraction -- runs offline on the result.
+summaries and clip listings -- can use the saved result. Lineage matching
+may call WoRMS; media extraction downloads the required archive files.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .annotations import Annotation, AnnotationSet, ReviewFilters, person_matches
 from .archive import (
@@ -25,6 +27,7 @@ from .taxonomy import WormsResolver, wanted_ancestor_names
 
 TAXONOMY_CODE_TO_ID = {"worms": 1, "cmecs": 2}
 TAXONOMY_ID_TO_CODE = {1: "WoRMS", 2: "CMECS"}
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -62,6 +65,21 @@ class FetchFilters:
     max_dives: Optional[int] = None
     page_size: int = 250
     resolve_taxon_names: bool = True
+
+    def __post_init__(self) -> None:
+        from .images import validate_limit
+
+        if parse_iso_utc(self.end_date) < parse_iso_utc(self.start_date):
+            raise ValueError("end_date must be on or after start_date")
+        if self.camera_mode not in {"dive", "stationary", "both"}:
+            raise ValueError("camera_mode must be 'dive', 'stationary', or 'both'")
+        if self.resolution not in {"H", "L", "S"}:
+            raise ValueError("resolution must be 'H', 'L', or 'S'")
+        for name in ("max_dives", "max_stationary_locations"):
+            validate_limit(name, getattr(self, name))
+        if not isinstance(self.page_size, int) or self.page_size <= 0:
+            raise ValueError("page_size must be a positive integer")
+        wanted_ancestor_names(self.groups, self.taxon_names)
 
     def effective_taxonomy_code(self) -> Optional[str]:
         code = (self.taxonomy_code or "").strip()
@@ -210,26 +228,26 @@ class AnnotationFetcher:
             stationary_records, stationary_media = self._stationary_records(filters, start_dt, end_dt)
             records.extend(stationary_records)
 
-        print(f"\nMatched annotations across selected modes: {len(records)}")
+        logger.info(f"\nMatched annotations across selected modes: {len(records)}")
 
         # Broad-group / lineage filtering happens before archive mapping so
         # discarded annotations never cost a video-metadata request.
         wanted = wanted_ancestor_names(filters.groups, filters.taxon_names)
         if wanted:
             resolver = self.resolver or WormsResolver(None)
-            print(f"Filtering to {len(wanted)} ancestor taxa ({', '.join(sorted(wanted))})")
+            logger.info(f"Filtering to {len(wanted)} ancestor taxa ({', '.join(sorted(wanted))})")
+            resolver.unresolved.clear()
             before = len(records)
             records = [r for r in records if resolver.annotation_matches(r, wanted)]
             resolver.save()
-            if resolver.unresolved:
-                print(f"[WARN] {len(resolver.unresolved)} taxa could not be resolved and were skipped")
-            print(f"Kept {len(records)} of {before} annotations")
+            resolver.warn_unresolved()
+            logger.info(f"Kept {len(records)} of {before} annotations")
 
-        print("Mapping annotations to archive video files (strict containment)...")
+        logger.info("Mapping annotations to archive video files (strict containment)...")
         self._attach_dive_archive_info(records, filters.resolution)
         self._attach_stationary_archive_info(records, stationary_media, filters.resolution)
         mapped = sum(1 for r in records if r.get("archiveFilename"))
-        print(f"{mapped}/{len(records)} annotations mapped to an archive file")
+        logger.info(f"{mapped}/{len(records)} annotations mapped to an archive file")
 
         return AnnotationSet(records)
 
@@ -247,7 +265,7 @@ class AnnotationFetcher:
             self.client, start_dt, end_dt,
             dive_ids=filters.dive_ids, max_dives=filters.max_dives,
         )
-        print(f"Dives overlapping the date range: {len(selected)}")
+        logger.info(f"Dives overlapping the date range: {len(selected)}")
 
         matched: List[Dict[str, Any]] = []
         for index, dive in enumerate(selected, start=1):
@@ -255,8 +273,7 @@ class AnnotationFetcher:
             try:
                 dive_annotations = self.client.dive_annotations(dive_id)
             except Exception as exc:
-                print(f"[WARN] dive {dive_id}: failed to fetch annotations ({exc})")
-                continue
+                raise RuntimeError(f"Could not fetch dive {dive_id}: {exc}") from exc
 
             for ann in dive_annotations:
                 ts_raw = ann.get("startDate") or ann.get("dateFrom")
@@ -274,12 +291,12 @@ class AnnotationFetcher:
                     "cameraMode": "dive",
                     "annotationId": ann_id,
                     "diveId": dive_id,
-                    "diveName": ann.get("diveName"),
+                    "diveName": ann.get("diveName") or dive.get("referenceDiveId"),
                     "cruiseName": ann.get("cruiseName"),
                     "stationarySearchTreeNodeId": None,
                     "stationaryLocationName": None,
                     "stationaryLocationPath": None,
-                    "startDate": ann.get("startDate"),
+                    "startDate": ts_raw,
                     "endDate": ann.get("endDate"),
                     "comment": ann.get("comment"),
                     "annotationSource": ann.get("annotationSource"),
@@ -300,7 +317,7 @@ class AnnotationFetcher:
                     "toBeReviewed": ann.get("toBeReviewed"),
                     "numPositiveReviews": ann.get("numPositiveReviews"),
                     "numTotalReviews": ann.get("numTotalReviews"),
-                    "contextualLink": seatube_link(600, dive_id, ann_id, ann.get("startDate") or ""),
+                    "contextualLink": seatube_link(600, dive_id, ann_id, ts_raw),
                 }
 
                 wrapped = Annotation(record)
@@ -311,9 +328,9 @@ class AnnotationFetcher:
                 matched.append(record)
 
             if index % 10 == 0 or index == len(selected):
-                print(f"  {index}/{len(selected)} dives scanned; matched so far: {len(matched)}")
+                logger.info(f"  {index}/{len(selected)} dives scanned; matched so far: {len(matched)}")
 
-        print(f"Matched dive annotations after filters: {len(matched)}")
+        logger.info(f"Matched dive annotations after filters: {len(matched)}")
         return matched
 
     # ------------------------------------------------------------------
@@ -342,7 +359,7 @@ class AnnotationFetcher:
         if filters.max_stationary_locations is not None:
             selected = selected[: filters.max_stationary_locations]
 
-        print(f"Fixed-camera locations selected: {len(selected)} (of {len(all_locations)})")
+        logger.info(f"Fixed-camera locations selected: {len(selected)} (of {len(all_locations)})")
         if not selected:
             return [], {}
 
@@ -362,7 +379,7 @@ class AnnotationFetcher:
                     location_by_device[device_id] = loc
 
         device_ids = sorted(media_by_device)
-        print(f"Stationary devices with video data: {len(device_ids)}")
+        logger.info(f"Stationary devices with video data: {len(device_ids)}")
 
         matched: List[Dict[str, Any]] = []
         detail_cache: Dict[int, Dict[str, Any]] = {}
@@ -372,8 +389,7 @@ class AnnotationFetcher:
             try:
                 candidates = self._stationary_candidates(device_id, filters)
             except Exception as exc:
-                print(f"[WARN] device {device_id}: failed candidate fetch ({exc})")
-                continue
+                raise RuntimeError(f"Could not fetch annotations for device {device_id}: {exc}") from exc
 
             loc = location_by_device.get(device_id) or {}
             for naive in candidates:
@@ -385,8 +401,7 @@ class AnnotationFetcher:
                     try:
                         detail = self.client.annotation_detail(ann_id)
                     except Exception as exc:
-                        print(f"[WARN] annotation {ann_id}: detail fetch failed ({exc})")
-                        continue
+                        raise RuntimeError(f"Could not fetch annotation {ann_id}: {exc}") from exc
                     detail_cache[ann_id] = detail
 
                 ann_start = detail.get("startDate") or naive.get("startDate")
@@ -426,9 +441,9 @@ class AnnotationFetcher:
                     "modifiedDate": detail.get("modifiedDate"),
                     "taxonomy": taxonomy,
                     "videoResourceId": naive.get("resourceId"),
-                    "videoResourceTypeId": detail.get("resourceType", {}).get("resourceTypeId"),
-                    "resourceTypeId": detail.get("resourceType", {}).get("resourceTypeId"),
-                    "resourceTypeName": detail.get("resourceType", {}).get("resourceTypeName"),
+                    "videoResourceTypeId": (detail.get("resourceType") or {}).get("resourceTypeId"),
+                    "resourceTypeId": (detail.get("resourceType") or {}).get("resourceTypeId"),
+                    "resourceTypeName": (detail.get("resourceType") or {}).get("resourceTypeName"),
                     "deviceId": naive.get("resourceId"),
                     "lat": naive.get("lat"),
                     "lon": naive.get("lon"),
@@ -453,9 +468,9 @@ class AnnotationFetcher:
                 matched.append(record)
 
             if idx % 5 == 0 or idx == len(device_ids):
-                print(f"  {idx}/{len(device_ids)} devices scanned; matched so far: {len(matched)}")
+                logger.info(f"  {idx}/{len(device_ids)} devices scanned; matched so far: {len(matched)}")
 
-        print(f"Matched stationary annotations after filters: {len(matched)}")
+        logger.info(f"Matched stationary annotations after filters: {len(matched)}")
         return matched, media_by_device
 
     def _stationary_candidates(self, device_id: int, filters: FetchFilters) -> List[Dict[str, Any]]:
@@ -477,7 +492,7 @@ class AnnotationFetcher:
             total_pages = payload.get("totalNumOfPages")
             if total_pages is not None and page_num >= int(total_pages):
                 break
-            if len(batch) < filters.page_size:
+            if total_pages is None and len(batch) < filters.page_size:
                 break
             page_num += 1
         return rows
@@ -510,8 +525,7 @@ class AnnotationFetcher:
             try:
                 cache[key] = self.client.taxon_detail(*key)
             except Exception as exc:
-                print(f"[WARN] taxonomy {key[0]} taxon {key[1]}: name resolution failed ({exc})")
-                cache[key] = None
+                raise RuntimeError(f"Could not resolve ONC taxonomy {key}: {exc}") from exc
 
         record = cache[key]
         if not record:
@@ -548,10 +562,11 @@ class AnnotationFetcher:
             try:
                 video_meta = self.client.dive_video_metadata(dive_id, resolution)
             except Exception as exc:
-                print(f"[WARN] dive {dive_id}: failed to fetch video metadata ({exc})")
-                continue
+                raise RuntimeError(f"Could not fetch video metadata for dive {dive_id}: {exc}") from exc
             media_files = video_meta.get("mediaFiles", []) or []
             if not media_files:
+                for record in anns:
+                    record["videoMappingStatus"] = "no_media_for_device"
                 continue
             for record in anns:
                 self._attach_archive_info(
@@ -579,6 +594,7 @@ class AnnotationFetcher:
     ) -> None:
         ann_start = record.get("startDate")
         if not media_file or not ann_start:
+            record["videoMappingStatus"] = "no_media_for_device" if not media_file else "missing_timestamp"
             return
         row = data_file_row_containing(media_file, parse_iso_utc(ann_start))
         if not row:

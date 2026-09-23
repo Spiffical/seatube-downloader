@@ -1,117 +1,124 @@
 # SeaTube Downloader
 
-Explore the expert annotations in [Ocean Networks Canada](https://data.oceannetworks.ca)'s
-SeaTube deep-sea video archive — who annotated what, where, and when — and
-download exactly what you need: labelled still images, clip timestamps, or
-whole videos.
+[![Tests](https://github.com/Spiffical/seatube-downloader/actions/workflows/tests.yml/badge.svg)](https://github.com/Spiffical/seatube-downloader/actions/workflows/tests.yml)
 
-```bash
-seatube fetch --start-date 2019-07-06T00:00:00.000Z --end-date 2019-07-06T23:59:59.000Z
-seatube images --group crabs --max-images 20
-```
+**Find annotated marine organisms in Ocean Networks Canada’s SeaTube archive, then extract frames or short video clips from Python.** Use it in a notebook or a script: discover dives and cameras, inspect which taxa were annotated, filter observations, and download only the archive files needed for your selection.
+
+This package searches **existing annotations**. It does not detect organisms in unannotated video. A supported search group does not guarantee that matching observations exist in your selected dates or locations.
+
+**Start here:** [Python walkthrough](docs/guide.md) · [Runnable notebook](examples/research_walkthrough.ipynb) · [Organism catalog](docs/organisms.md) · [API reference](docs/python-api.md)
+
+## What can I search for?
+
+There are **44 built-in groups**, plus scientific names at any taxonomic rank. Matching follows the annotation’s [WoRMS classification](https://www.marinespecies.org/rest/): a species can match a broader group even when the common name is absent from its label.
+
+| Organisms of interest | Example search names |
+|---|---|
+| Fishes | `fish`, `rockfish`, `sharks-and-rays` |
+| Crustaceans | `crabs`, `true-crabs`, `hermit-crabs`, `squat-lobsters`, `shrimp`, `lobsters`, `barnacles` |
+| Echinoderms | `sea-stars`, `brittle-stars`, `sea-urchins`, `sea-cucumbers`, `crinoids` |
+| Corals and other cnidarians | `corals`, `hard-corals`, `soft-corals`, `black-corals`, `sea-pens`, `anemones`, `tube-anemones`, `jellyfish`, `hydroids` |
+| Sponges and comb jellies | `sponges`, `glass-sponges`, `ctenophores` |
+| Molluscs | `octopus-and-squid`, `snails`, `nudibranchs`, `bivalves` |
+| Other groups | `worms`, `tunicates`, `bryozoans`, `brachiopods`, `sea-spiders`, `marine-mammals`, `seabirds`, `algae`, `bacteria` |
+| A particular scientific taxon | `Chionoecetes tanneri`, `Sebastes`, `Brachyura`, or another name carried by a label or lineage |
+
+Read the [complete catalog](docs/organisms.md) for ancestor definitions, aliases, and scope. For example, `crabs` includes **Brachyura and Anomura**, while `true-crabs` selects Brachyura only. `squid` is an alias for **all cephalopods**, and `kelp` selects the wider algae group; use a scientific name to narrow either search.
 
 ## Install
+
+Python 3.9 or newer. Install from a local clone; all analysis after installation can be done in Python.
 
 ```bash
 git clone https://github.com/Spiffical/seatube-downloader.git
 cd seatube-downloader
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e .
+python3 -m venv .venv
+source .venv/bin/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
+python -m pip install -e ".[notebooks]"
 ```
 
-Requires `ffmpeg` on your PATH for image extraction. Get a free API token by
-registering at [data.oceannetworks.ca](https://data.oceannetworks.ca), then:
+The notebook extra installs JupyterLab and pandas. For scripts alone, use `python -m pip install -e .`.
+
+For live ONC queries and downloads, register at [Oceans 3.0](https://data.oceannetworks.ca), copy your Web Services API token from your profile, and put it in a file named `.env` in your working directory:
+
+```dotenv
+ONC_TOKEN=your-token-here
+```
+
+Keep this file private; it is ignored by Git. For **media extraction only**, install [ffmpeg](https://ffmpeg.org/download.html) and make it available on `PATH` (for example, `brew install ffmpeg` on macOS or `sudo apt install ffmpeg` on Ubuntu). Metadata search and planning do not need ffmpeg.
+
+## A research workflow in Python
+
+```python
+from seatube import SeaTube
+
+sea = SeaTube(data_dir="downloads")  # loads ONC_TOKEN; keeps a reusable taxonomy cache
+sea.groups("crab")                   # supported search definitions; no network
+
+# Metadata only: fetch a manageable date range before downloading any video.
+annotations = sea.fetch(
+    start_date="2019-07-06T00:00:00Z",
+    end_date="2019-07-06T23:59:59Z",
+    save_to="downloads/annotations.json",
+)
+print(annotations.summary())
+
+# What is actually annotated in THIS dataset? Counts may overlap between groups.
+for row in sea.available_groups(annotations):
+    print(row["group"], row["annotations"], row["mapped_annotations"])
+
+crabs = sea.search(annotations, "crabs")
+# Other searches: ["sponges", "sea-stars"], "Sebastes", "Chionoecetes tanneri"
+print(crabs.taxon_summary())
+
+# Plan a small image set. These limits are deliberate: source files can be large.
+frames = crabs.frames(max_images=20, max_videos=2)
+images = sea.image_downloader("outputs/crab_frames")
+print(images.describe_plan(frames))  # optional HEAD requests for sizes; no video download
+```
+
+When the selection and estimated cost look right:
+
+```python
+image_rows = images.download(frames)  # JPEGs + images_index.csv + images_index.jsonl
+
+clips = crabs.clips(before_seconds=5, after_seconds=5, max_clips=5, max_videos=2)
+video = sea.clip_downloader("outputs/crab_clips")
+print(video.describe_plan(clips))
+clip_rows = video.download(clips)     # MP4 excerpts + clips_index.csv + clips_index.jsonl
+sea.close()
+```
+
+`clips()` merges overlapping excerpts and trims them to the containing archive file. `clip_index()` gives timestamps and player links without extracting video. Images and clips retain the source annotations, taxa, IDs, annotator names, location/depth when supplied, and SeaTube links in their indexes.
+
+**Try it without a token:** the [notebook](examples/research_walkthrough.ipynb) and [Python example](examples/offline_workflow.py) start with six clearly marked synthetic observations and a bundled taxonomy cache. Their default path never contacts ONC or downloads media.
+
+## What to expect
+
+- **Search scope:** ROV dives by default; fixed cameras with `camera_mode="stationary"`, or both with `"both"`. Choose dates, dive IDs, or camera locations; this is not a prebuilt index of the entire SeaTube archive.
+- **Taxonomy:** groups and scientific names match labels or ancestor names. Species-level searches do not recover annotations identified only to a family or phylum. Unknown names are not automatically spell-corrected.
+- **Network:** repeated exploration uses saved annotations. New lineage lookups may call WoRMS. Use `offline_taxa=True` with a populated cache for offline matching; incomplete classification raises a warning.
+- **Download cost:** extraction downloads whole source archive files. Plans prefer files containing more requested outputs; this is a heuristic, not a byte-minimization guarantee. Missing size estimates are explicitly unknown. `max_videos` caps file count, not bytes.
+- **Scientific interpretation:** labels identify observations, not bounding boxes, individuals, abundance, or verified presence throughout an excerpt. Zero matches can reflect incomplete annotation, unknown taxonomy, a recording gap, or a narrow query. Inspect images before treating labels as ground truth.
+
+## Documentation and optional CLI
+
+- [Research guide](docs/guide.md): discovery, filters, frames, clips, exports, and troubleshooting.
+- [Organism catalog](docs/organisms.md): all groups and what each one includes.
+- [Python API](docs/python-api.md): public classes, methods, and parameters.
+- [CLI and data reference](docs/reference.md): optional terminal commands and output schemas.
+- [Contributing](CONTRIBUTING.md): setup, offline tests, and project conventions.
+- [Changelog](CHANGELOG.md): changes in the Python research workflow.
+
+The CLI remains available for batch jobs and shell workflows:
 
 ```bash
-cp .env.example .env      # set ONC_TOKEN=<your-token>
+seatube groups
+seatube taxa --annotations downloads/annotations.json
+seatube images --group crabs --max-images 20 --max-videos 2 --dry-run
+seatube extract-clips --group crabs --max-clips 5 --max-videos 2 --dry-run
 ```
-
-## Sixty-second tour
-
-```bash
-# 1. pull a day of ROV annotations (metadata only — megabytes, not video)
-seatube fetch --start-date 2019-07-06T00:00:00.000Z --end-date 2019-07-06T23:59:59.000Z
-
-# 2. who annotated, how much, what
-seatube annotators
-#   Ashley Marranzino  8069 annotations, 21 taxa, top: Actinopterygii, Crustacea...
-#   Upasana Ganguly     261 annotations, 34 taxa, top: Actinopterygii, Inachidae...
-
-# 3. what's in there, filtered to a broad group
-seatube taxa --group crabs
-#   Inachidae 44, Brachyura 37, Galatheoidea 6, ...   (103 crab annotations)
-
-# 4. which videos and timestamps show them (no download)
-seatube clips --group crabs --window-seconds 60 --csv crab_clips.csv
-
-# 5. the images themselves — dry-run first to see the byte cost
-seatube images --group crabs --max-images 4 --dry-run
-#   Would download 0.07 GB to produce 4 images.
-seatube images --group crabs --max-images 4
-```
-
-## Commands
-
-| command | what it does |
-|---|---|
-| `seatube survey` | scout a date range: which dives/sites have annotations |
-| `seatube fetch` | pull filtered annotations from ONC into a local file |
-| `seatube annotators` | leaderboard: who annotated, how much, when, what |
-| `seatube taxa` | counts by taxon |
-| `seatube clips` | video files + timestamps for chosen annotations |
-| `seatube images` | extract labelled stills + a CSV/JSONL index |
-| `seatube videos` | download whole archive video files |
-| `seatube groups` | the broad taxon-group vocabulary |
-| `seatube dives` | ROV dives in a date range, with their ids |
-| `seatube locations` | fixed-camera site ids |
-
-Only `survey`, `fetch`, and the actual downloads talk to ONC — everything
-else slices the fetched file offline, so one fetch supports unlimited
-exploration.
-
-## Three ideas worth knowing
-
-**Broad taxon groups.** `--group crabs` matches an *Inachidae* annotation
-because Inachidae sits under Brachyura in the real WoRMS classification —
-matching walks lineages, not label text. 44 groups (`seatube groups`), plus
-`--taxon-name <AnyWormsTaxon>` for everything else. Lineages are cached
-locally after one lookup each.
-
-**Download cost is stated up front.** ONC serves whole archive files only
-(~70–200 MB per five minutes of video), so one frame costs one file.
-`seatube images` plans richest-file-first to satisfy your request with the
-fewest downloads, `--dry-run` prints the exact byte cost, and
-`--max-images` / `--max-videos` / `--max-per-taxon` set the budget — take
-four images or five thousand.
-
-**Provenance travels with every image.** The index carries taxa, WoRMS
-AphiaIDs, position, depth, the annotator's name, and a link that opens the
-exact moment in ONC's SeaTube player.
-
-## Documentation
-
-- **[Guide](docs/guide.md)** — a worked session with real commands and real
-  output, from scouting a date range to a labelled image set
-- **[Reference](docs/reference.md)** — every command and flag, the data
-  model, and the design constraints (whole-file downloads, strict timestamp
-  containment)
-- **[Python API](docs/python-api.md)** — the same power as a library:
-  `AnnotationSet`, `FetchFilters`, `ImageDownloader`
-
-## Tests
-
-```bash
-pip install pytest && python -m pytest tests -q
-```
-
-Fully offline. Coverage concentrates where a quiet mistake would produce
-plausible-but-wrong data: mapping timestamps to the archive file that truly
-contains them, seek offsets, and lineage-to-group matching.
 
 ## Data and credit
 
-Video and annotations belong to Ocean Networks Canada and the expedition
-teams that produced them. Check ONC's
-[data policy](https://www.oceannetworks.ca/data-tools/data-policy/) before
-publishing, and credit the annotators — `seatube annotators` shows you
-exactly whose expertise you're building on.
+This is an independent tool for working with [ONC SeaTube](https://data.oceannetworks.ca/SeaTube). Follow ONC’s [data policy](https://www.oceannetworks.ca/data-tools/data-policy/) and [citation guidance](https://www.oceannetworks.ca/data/how-to-cite-onc/) when using their data. Credit the expedition teams, annotators, ONC, and the taxonomy source as appropriate. The bundled tutorial observations are synthetic and must not be cited as ocean observations.

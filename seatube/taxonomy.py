@@ -14,14 +14,26 @@ but the names in a lineage are stable.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
+import warnings
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set
 
 import requests
 
 WORMS_REST = "https://www.marinespecies.org/rest"
+logger = logging.getLogger(__name__)
+
+
+class IncompleteTaxonomyWarning(UserWarning):
+    """Some taxa could not be classified; absence of matches is inconclusive."""
+
+
+def as_names(values: Sequence[str]) -> List[str]:
+    """Accept either one name or a sequence, without iterating a string's letters."""
+    return [values] if isinstance(values, str) else list(values)
 
 # group name -> (ancestor taxa, human description)
 TAXON_GROUPS: Dict[str, Dict[str, Any]] = {
@@ -52,7 +64,8 @@ TAXON_GROUPS: Dict[str, Dict[str, Any]] = {
     "hard-corals": {"ancestors": ["Scleractinia"], "description": "stony corals"},
     "soft-corals": {"ancestors": ["Octocorallia"], "description": "octocorals, gorgonians, sea pens"},
     "black-corals": {"ancestors": ["Antipatharia"], "description": "black corals"},
-    "sea-pens": {"ancestors": ["Pennatulacea"], "description": "sea pens"},
+    "sea-pens": {"ancestors": ["Pennatuloidea", "Pennatulacea"],
+                 "description": "sea pens (current and legacy ancestor names)"},
     "anemones": {"ancestors": ["Actiniaria", "Corallimorpharia"], "description": "sea anemones"},
     "tube-anemones": {"ancestors": ["Ceriantharia"], "description": "cerianthid tube anemones"},
     "jellyfish": {"ancestors": ["Scyphozoa", "Cubozoa", "Staurozoa"], "description": "true jellyfish"},
@@ -63,7 +76,7 @@ TAXON_GROUPS: Dict[str, Dict[str, Any]] = {
     "glass-sponges": {"ancestors": ["Hexactinellida"], "description": "hexactinellid glass sponges"},
     "octopus-and-squid": {"ancestors": ["Cephalopoda"], "description": "cephalopods"},
     "snails": {"ancestors": ["Gastropoda"], "description": "gastropods"},
-    "nudibranchs": {"ancestors": ["Nudibranchia"], "description": "sea slugs"},
+    "nudibranchs": {"ancestors": ["Nudibranchia"], "description": "nudibranch sea slugs (not all sea slugs)"},
     "bivalves": {"ancestors": ["Bivalvia"], "description": "clams, mussels, scallops"},
     "molluscs": {"ancestors": ["Mollusca"], "description": "all molluscs"},
     "worms": {"ancestors": ["Annelida", "Nemertea", "Sipuncula", "Echiura"],
@@ -72,14 +85,15 @@ TAXON_GROUPS: Dict[str, Dict[str, Any]] = {
     "bryozoans": {"ancestors": ["Bryozoa"], "description": "moss animals"},
     "brachiopods": {"ancestors": ["Brachiopoda"], "description": "lamp shells"},
     "sea-spiders": {"ancestors": ["Pycnogonida"], "description": "pycnogonids"},
-    "marine-mammals": {"ancestors": ["Mammalia"], "description": "whales, dolphins, seals"},
-    "seabirds": {"ancestors": ["Aves"], "description": "birds"},
+    "marine-mammals": {"ancestors": ["Mammalia"], "description": "all mammal annotations, including whales, dolphins and seals"},
+    "seabirds": {"ancestors": ["Aves"], "description": "all bird annotations; not restricted to seabirds"},
     "algae": {"ancestors": ["Rhodophyta", "Chlorophyta", "Phaeophyceae", "Ochrophyta"],
-              "description": "red, green and brown algae"},
-    "bacteria": {"ancestors": ["Bacteria"], "description": "bacterial mats"},
+              "description": "red/green algae and ochrophytes (including brown algae)"},
+    "bacteria": {"ancestors": ["Bacteria"], "description": "all bacterial annotations, including mats"},
 }
 
-# colloquial spellings accepted on the command line
+# Colloquial spellings accepted by both Python and the CLI. Aliases select the
+# ENTIRE target group: e.g. "squid" also includes other cephalopods.
 GROUP_ALIASES: Dict[str, str] = {
     "crab": "crabs", "sponge": "sponges", "seastar": "sea-stars", "starfish": "sea-stars",
     "sea-star": "sea-stars", "urchin": "sea-urchins", "sea-urchin": "sea-urchins",
@@ -110,9 +124,40 @@ def normalize_group_name(name: str) -> str:
 def ancestors_for_groups(names: Iterable[str]) -> Set[str]:
     """Collect the ancestor taxa for a set of group names (lowercased)."""
     out: Set[str] = set()
-    for name in names:
+    for name in as_names(names):
         out.update(a.lower() for a in TAXON_GROUPS[normalize_group_name(name)]["ancestors"])
     return out
+
+
+def organism_groups(query: str = "") -> List[Dict[str, Any]]:
+    """Discover supported groups, definitions and aliases (no network).
+
+    These are search definitions, not evidence that an organism occurs in a
+    particular dive or date range. Use ``AnnotationSet.group_summary`` for that.
+    """
+    rows = []
+    needle = query.strip().casefold().replace("_", "-").replace(" ", "-")
+    for name, spec in TAXON_GROUPS.items():
+        aliases = sorted(a for a, target in GROUP_ALIASES.items() if target == name)
+        row = {"group": name, "description": spec["description"],
+               "ancestors": list(spec["ancestors"]), "aliases": aliases}
+        searchable = " ".join([name, spec["description"], *spec["ancestors"], *aliases])
+        if not needle or needle in searchable.casefold().replace(" ", "-"):
+            rows.append(row)
+    return rows
+
+
+def search_terms(organisms: Sequence[str]) -> tuple:
+    """Split familiar group names and explicit scientific names for a search."""
+    groups, taxa = [], []
+    for term in as_names(organisms):
+        if not isinstance(term, str) or not term.strip():
+            raise ValueError("Each organism must be a non-empty group or scientific name")
+        try:
+            groups.append(normalize_group_name(term))
+        except KeyError:
+            taxa.append(term.strip())
+    return groups, taxa
 
 
 def format_group_table() -> str:
@@ -173,9 +218,14 @@ class WormsResolver:
         self._cache: Dict[str, List[str]] = {}
         self._dirty = False
         self.unresolved: Set[str] = set()
+        self._failed: Set[str] = set()
         if self.cache_path and self.cache_path.exists():
             try:
-                self._cache = json.loads(self.cache_path.read_text())
+                cached = json.loads(self.cache_path.read_text(encoding="utf-8"))
+                if isinstance(cached, dict):
+                    self._cache = {k: v for k, v in cached.items()
+                                   if isinstance(v, list) and v and
+                                   all(isinstance(n, str) for n in v)}
             except (OSError, ValueError):
                 self._cache = {}
 
@@ -198,22 +248,29 @@ class WormsResolver:
                 return names
             except Exception as exc:  # network flake, rate limit, malformed payload
                 last_error = exc
-                time.sleep(1.5 * (attempt + 1))
+                if attempt < 2:
+                    time.sleep(1.5 * (attempt + 1))
         raise RuntimeError(f"WoRMS lookup failed for AphiaID {aphia_id}: {last_error}")
 
     def lineage(self, aphia_id: int) -> List[str]:
         key = str(int(aphia_id))
         if key in self._cache:
             return self._cache[key]
-        if self.offline:
+        if self.offline or key in self._failed:
             self.unresolved.add(key)
             return []
         try:
             names = self._fetcher(int(aphia_id))
         except Exception as exc:
-            print(f"[WARN] {exc}")
+            logger.warning("%s", exc)
             self.unresolved.add(key)
+            self._failed.add(key)
             return []
+        if not names:
+            self.unresolved.add(key)
+            self._failed.add(key)
+            return []
+        self.unresolved.discard(key)
         self._cache[key] = names
         self._dirty = True
         return names
@@ -221,7 +278,9 @@ class WormsResolver:
     def save(self) -> None:
         if self.cache_path and self._dirty:
             self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-            self.cache_path.write_text(json.dumps(self._cache, indent=1, sort_keys=True))
+            temporary = self.cache_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(self._cache, indent=1, sort_keys=True), encoding="utf-8")
+            temporary.replace(self.cache_path)
             self._dirty = False
 
     def taxon_matches(self, taxon: Dict[str, Any], wanted: Set[str]) -> bool:
@@ -237,6 +296,7 @@ class WormsResolver:
             return True
         aphia_id = aphia_id_from_taxon(taxon)
         if aphia_id is None:
+            self.unresolved.add("label:" + "|".join(taxon_names(taxon) or ["unknown"]))
             return False
         return any(name.lower() in wanted for name in self.lineage(aphia_id))
 
@@ -254,12 +314,23 @@ class WormsResolver:
         aphia_id = aphia_id_from_taxon(taxon)
         if aphia_id is not None:
             names.update(n.lower() for n in self.lineage(aphia_id))
+        else:
+            self.unresolved.add("label:" + "|".join(taxon_names(taxon) or ["unknown"]))
         return [g for g, spec in TAXON_GROUPS.items()
                 if names & {a.lower() for a in spec["ancestors"]}]
+
+    def warn_unresolved(self) -> None:
+        if self.unresolved:
+            warnings.warn(
+                f"Could not fully classify {len(self.unresolved)} taxon(s). "
+                "Results may be incomplete; inspect resolver.unresolved. "
+                "A zero count does not establish absence.",
+                IncompleteTaxonomyWarning, stacklevel=3,
+            )
 
 
 def wanted_ancestor_names(groups: Sequence[str], ancestors: Sequence[str]) -> Set[str]:
     """Build the lowercased ancestor set from --group and --taxon-name values."""
     wanted = ancestors_for_groups(groups) if groups else set()
-    wanted.update(a.strip().lower() for a in ancestors if a.strip())
+    wanted.update(a.strip().lower() for a in as_names(ancestors) if a.strip())
     return wanted

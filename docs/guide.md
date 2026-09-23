@@ -1,223 +1,168 @@
-# Guide: exploring SeaTube end to end
+# Find organisms, frames, and clips with Python
 
-A worked session, with real commands and real output. The running example is
-NOAA's *Okeanos Explorer* dive EX1903L2_Dive14 (July 6 2019, ~360 m down on
-the southeast US continental margin), which carries several thousand expert
-annotations.
+This guide is for researchers using a notebook or a Python script. First install the package and configure an ONC token as described in the [README](../README.md). You only need ffmpeg when extracting media. The [notebook](../examples/research_walkthrough.ipynb) also provides a completely offline introduction.
 
-Every command below except `survey` and `fetch` runs **offline** on a local
-file — fetch once, slice as many ways as you like.
+## 1. Choose your biological search
 
-## 1. Scout a date range — `survey`
+```python
+from seatube import SeaTube, AnnotationSet, ReviewFilters
 
-Before committing to a fetch, see where annotations exist at all:
-
-```bash
-seatube survey --start-date 2019-07-01T00:00:00.000Z --end-date 2019-07-31T23:59:59.000Z
+sea = SeaTube(data_dir="downloads")
+sea.groups()          # all 44 search groups, descriptions, ancestors, aliases
+sea.groups("coral")   # discover relevant definitions
 ```
 
-`survey` orders one bulk annotation export from ONC (a minute or two) and
-prints which dives/locations have annotations, with counts and annotator
-names, plus a top-annotators tally. Use it to pick the dates and places worth
-fetching.
+A group is a rule for matching a taxonomic lineage. It is not an inventory of available video. For the exact biological scope, see the [organism catalog](organisms.md).
 
-## 2. Pull the annotations — `fetch`
+`"crabs"` includes true crabs and anomurans; `"true-crabs"` is narrower. Use a scientific name such as `"Chionoecetes tanneri"` when you need species-level annotations. That search cannot promote an observation labelled only `Brachyura` to species level. Multiple names mean **any** of those organisms, not necessarily co-occurrence in the same frame.
 
-```bash
-seatube fetch \
-  --start-date 2019-07-06T00:00:00.000Z \
-  --end-date 2019-07-06T23:59:59.000Z
+## 2. Find places and dates
+
+Choose a small date range for the first fetch. Listing dives returns ONC IDs, names, dates, and other metadata:
+
+```python
+dives = sea.dives("2019-07-06T00:00:00Z", "2019-07-06T23:59:59Z")
+for dive in dives:
+    print(dive["diveId"], dive.get("referenceDiveId"), dive.get("dateFrom"))
+
+locations = sea.locations()  # fixed-camera tree, not a list of organism occurrences
+for location in locations[:5]:
+    print(location["searchTreeNodeId"], location["path"])
 ```
 
-```
-Dives overlapping the date range: 1 (of 2065 listed)
-Matched dive annotations after filters: 8487
-Mapping annotations to archive video files (strict containment)...
-8487/8487 annotations mapped to an archive file
-Saved 8487 annotations to downloads/annotations.json
-```
+If you need to scout a longer period, `run_survey()` orders ONC’s STEXPORT annotation product and summarizes its scopes and annotators:
 
-This is the only expensive step, and it costs minutes and megabytes — no
-video moves. Each annotation is stamped with the archive video file that
-*truly contains* its timestamp (see [reference.md](reference.md#archive-file-mapping)
-for why "truly" matters).
+```python
+from seatube import run_survey
 
-You can filter at fetch time too — the same `--group`, `--creator`,
-`--reviewed-only`, etc. work here — but fetching broadly and filtering
-offline is usually better: one fetch, many slices.
-
-To target specific dives instead of a whole date range, list them first —
-`seatube dives` is where dive ids come from:
-
-```bash
-seatube dives --start-date 2019-07-01T00:00:00.000Z --end-date 2019-07-10T00:00:00.000Z
+# Online metadata export; may take several minutes. No video is downloaded.
+# survey = run_survey(sea.client.token, "2019-07-01T00:00:00Z", "2019-08-01T00:00:00Z")
+# survey["scopes"][:10]
 ```
 
-```
-dive_id  dive             start             end               area              comment
-------------------------------------------------------------------------------------------
-1463     EX1903L2_Dive13  2019-07-05T12:00  2019-07-05T21:00  Southeast U.S.    Roanoke Minor Canyon...
-1473     EX1903L2_Dive14  2019-07-06T12:00  2019-07-06T23:00  Southeast U.S.    Bodie Seep
-...
-```
+The survey’s scope strings help locate activity; get authoritative numeric IDs from `dives()` or `locations()`. A camera listed in the tree need not have observations in your date range.
 
-```bash
-seatube fetch --dive-id 1473 \
-  --start-date 2019-07-06T00:00:00.000Z --end-date 2019-07-06T23:59:59.000Z
-```
+## 3. Fetch annotations once
 
-Fixed cameras work the same way: `seatube locations` is where site ids come
-from.
-
-```bash
-seatube locations
+```python
+annotations = sea.fetch(
+    start_date="2019-07-06T00:00:00Z",
+    end_date="2019-07-06T23:59:59Z",
+    camera_mode="dive",  # also "stationary" or "both"
+    resolution="L",      # mapped source video resolution; H/L/S
+    save_to="downloads/annotations.json",
+)
+print(annotations.summary())
 ```
 
-```
-id    path
---------------------------------------------------------------------------------------
-...
-2334  Fixed Cameras > Pacific > British Columbia North Coast > Douglas Channel > Hartley Bay Shore Station
-2335  Fixed Cameras > Pacific > British Columbia North Coast > Douglas Channel > Hartley Bay Underwater Network
-...
-```
+This fetches annotation and video **metadata**, not video bytes. It includes WoRMS-labelled observations by default. A default fetch is not restricted to one organism, so you can explore it repeatedly. For a smaller result, pass `organisms="sponges"`; that filters the returned observations and archive mapping work, but still scans the selected sources for annotations.
 
-```bash
-seatube fetch --camera-mode stationary --search-tree-node-id 2335 \
-  --start-date 2021-10-01T00:00:00.000Z --end-date 2021-12-31T23:59:59.000Z
-```
+Use `dive_ids={...}` with IDs returned by `dives()`, or `node_ids={...}` for fixed cameras. `max_dives=3` or `max_stationary_locations=2` can bound an exploratory scan, but limits deliberately make it incomplete. Date-only strings mean **midnight UTC**, not the whole day; use explicit start and end timestamps when you want a day's observations. Query endpoints are inclusive in this package.
 
-(Or skip the ids entirely: `--location-name-contains "Hartley Bay"`.)
+A request failure raises an exception rather than returning a silently partial fetch. A successful request with no containing video file remains in the dataset as an unmapped observation. Some endpoints used here support the SeaTube web application and can change independently of the public SDK.
 
-## 3. Who annotated? — `annotators`
+## 4. Discover what was actually annotated
 
-```bash
-seatube annotators
+```python
+annotations = AnnotationSet.load("downloads/annotations.json")
+print(annotations.summary())
+
+for row in sea.available_groups(annotations):
+    print(row["group"], row["annotations"], row["mapped_annotations"], row["taxa"])
+
+for taxon in annotations.taxon_summary():
+    print(taxon.name, taxon.aphia_id, taxon.annotations)
 ```
 
-```
-annotator          user_id  annotations  reviewed  taxa  dives/sites  first       last        top_taxa
-----------------------------------------------------------------------------------------------------------------------------------------
-Ashley Marranzino  113530   8069         8068      21    1            2019-07-06  2019-07-06  Actinopterygii, Crustacea, Myctophidae
-Upasana Ganguly    49360    261          257       34    1            2019-07-06  2019-07-06  Actinopterygii, Inachidae, Brachyura
-Herbert Leavitt    90370    77           76        11    1            2019-07-06  2019-07-06  Actinopterygii, Crustacea, Cephalopoda
-Tara Luke          44145    72           72        29    1            2019-07-06  2019-07-06  Bathymodiolus, Inachidae, Myxine glutinosa
-...
-```
+`available_groups()` can look up uncached lineages at WoRMS. One annotation may contribute to several groups: a crab is also a crustacean. Counts represent annotated records, not numbers of animals. `mapped_annotations` tells you how many records have usable positions inside source video files.
 
-Volume, review status, taxonomic breadth, activity span, and favourite taxa
-per annotator. `--csv annotators.csv` writes the full table (including user
-ids and emails, which ONC publishes with the annotations).
+For a notebook table, install the notebook extra and wrap the returned rows in `pandas.DataFrame(...)`. `taxon_summary()` and `annotator_summary()` return dataclasses; use `dataclasses.asdict()` before converting those to a table.
 
-To keep only one person's work, filter any command with `--creator` (name
-substring) or `--creator-id` — the exact id from the `user_id` column above:
+## 5. Select observations
 
-```bash
-seatube taxa --creator-id 49360               # Upasana Ganguly, per the table
-seatube images --creator "Ganguly" --group crabs --max-images 10
-```
+```python
+crabs = sea.search(annotations, "crabs")
+organisms = sea.search(annotations, ["sponges", "sea-stars"])  # union / OR
+species = sea.search(annotations, "Chionoecetes tanneri")
 
-## 4. What was annotated? — `taxa`
+reviewed_crabs = sea.search(
+    annotations,
+    "crabs",
+    min_depth_m=500,
+    max_depth_m=2000,
+    review=ReviewFilters(reviewed_only=True, min_total_reviews=1),
+)
 
-```bash
-seatube taxa --group crabs
+# Text search is separate: useful for inspecting the actual vocabulary.
+label_matches = annotations.filter(taxon_contains="Chionoecetes")
+# An AphiaID selects that exact recorded taxon, without expanding descendants.
+exact_taxon = annotations.filter(aphia_ids=[106673])
 ```
 
-```
-103 annotations pass the filters
-taxon         aphia_id  annotations  annotators  dives/sites
-------------------------------------------------------------
-Inachidae     148427    44           2           1
-Brachyura     106673    37           2           1
-Galatheoidea  106685    6            2           1
-Anomura       106671    5            1           1
-...
-```
+Additional filters include `creator`, `creator_id`, `dive_contains`, `location_contains`, `camera_mode`, `start_date`, and `end_date`. Different filter fields combine with **AND**. Records with unknown depth are excluded when a depth bound is requested. Location text filters apply to fixed-camera name/path; use `dive_contains` for ROV dive names.
 
-Note what happened: `--group crabs` matched **Inachidae** and **Galatheidae**
-annotations even though neither label contains "crab". Matching walks each
-taxon's real WoRMS classification (Inachidae sits under Brachyura), not the
-label text. `seatube groups` prints all 44 groups; `--taxon-name Sebastes`
-works for anything the vocabulary lacks. Add `--show-groups` to label each
-taxon with the groups it belongs to.
+The results retain each entire source annotation, including co-labelled taxa. Matching a crab does not mean every returned taxon label is a crab. Review fields are useful quality signals, but “reviewed” does not establish identification accuracy. `require_cross_review` checks for different creator/modifier IDs; it is only a proxy, not a reviewer-history audit.
 
-## 5. Where in the video? — `clips`
+## 6. Plan and extract frames
 
-The list-of-videos-and-timestamps view. With `--window-seconds`, nearby
-annotations merge so you can find dense stretches worth watching:
+```python
+frames = crabs.frames(max_images=20, max_videos=2, max_per_taxon=10)
+images = sea.image_downloader("outputs/crab_frames", keep_videos=True)
+plan = images.plan(frames)  # structured records; may request Content-Length headers
+print(images.describe_plan(frames))
 
-```bash
-seatube clips --group crabs --window-seconds 60
+# After inspecting the plan:
+# image_rows = images.download(frames)
 ```
 
-```
-archive_file                                                offset_s  utc                       count  taxa
-------------------------------------------------------------------------------------------------------------------------------------
-INSITEZEUSPLUS_DEEPDISCOVERER_20190706T202501.000Z-LOW.mp4  60.0      2019-07-06T20:26:18.000Z  4      Anomura, Brachyura, Inachidae
-INSITEZEUSPLUS_DEEPDISCOVERER_20190706T140001.000Z-LOW.mp4  60.0      2019-07-06T14:01:02.000Z  2      Anomura, Paguridae
-...
-88 rows across 53 archive file(s).
-```
+`max_per_taxon` is a strict cap on each recorded label, including co-labelled taxa; it does not enforce equal class sizes. File selection is deterministic, prefers files with more requested frames, and is not a representative random sample. For ecological comparisons, choose a sampling design rather than treating this download heuristic as one.
 
-Each row is: this archive file, this many seconds in, these creatures.
-`--csv clips.csv` adds annotation ids and a `seatube_link` per row that opens
-the exact moment in ONC's SeaTube player — often all you need, with zero
-bytes of video downloaded.
+With `dedupe_seconds=1`, nearby annotations are bucketed together and the earliest actual annotation instant in the bucket is extracted. Other labels can refer to slightly different times; use the default `0` if that distinction matters. Records sharing exactly one file and instant always merge.
 
-## 6. Get images — `images`
+A frame costs a whole source archive download unless that file is already cached. Sizes may be unknown; `max_videos` is a file-count limit. `plan(check_sizes=False)` performs no network requests. `keep_videos=True` retains new source downloads; by default, newly downloaded source files are removed after successful extraction. Existing files supplied through `video_dir` are retained.
 
-Always dry-run first; it prints the exact byte cost:
+## 7. Plan and extract clips
 
-```bash
-seatube images --group crabs --max-images 4 --dry-run
+```python
+clips = crabs.clips(before_seconds=5, after_seconds=10, max_clips=5, max_videos=2)
+video = sea.clip_downloader("outputs/crab_clips", video_dir="outputs/crab_frames/_videos")
+print(video.describe_plan(clips))
+
+# clip_rows = video.download(clips)
 ```
 
-```
-103 annotations pass the filters
-100 distinct frames available; 4 selected from 1 archive file(s)
-  INSITEZEUSPLUS_DEEPDISCOVERER_20190706T194001.000Z-LOW.mp4  ->  4 image(s), 0.07 GB
+The same source cache can serve images and clips. Each excerpt covers the annotation instant plus the requested context, clamped to the containing archive. Overlapping/touching intervals in the same file merge, so a merged clip can exceed the nominal context length. Files are never stitched across boundaries or gaps; observations without known source duration are skipped with a warning.
 
-Would download 0.07 GB to produce 4 images.
-```
+Clips are silent H.264 MP4s, re-encoded for accurate cuts to source frame precision. An annotation does not establish that the organism is visible for the full clip duration. For browsing without downloads:
 
-One file, not four: the planner groups frames by the archive file holding
-them and visits the richest files first. Drop `--dry-run` to execute:
-
-```
-[1/1] downloading INSITEZEUSPLUS_DEEPDISCOVERER_20190706T194001.000Z-LOW.mp4 for 4 image(s)
-4 new image(s) written, 4 indexed in images
+```python
+moments = crabs.clip_index()                  # exact timestamp rows
+windows = crabs.clip_index(window_seconds=60) # coarse buckets for browsing, not media excerpts
 ```
 
-The result is JPEGs plus `images_index.csv` / `.jsonl` carrying, per image:
-taxa, WoRMS AphiaIDs, broad groups, lat/lon/depth, annotator, and the
-SeaTube link back to the exact moment. Scaling up:
+## 8. Export and retain provenance
 
-```bash
-seatube images --group crabs --group sponges --max-images 500   # training set
-seatube images --group fish --max-per-taxon 25                  # balanced classes
-seatube images --group crabs --max-videos 10                    # hard byte budget
+```python
+crabs.save("outputs/crab_annotations.json")
+crabs.write_flat_csv("outputs/crab_annotations.csv")
+crabs.write_flat_jsonl("outputs/crab_annotations.jsonl")
+
+# Optional pandas analysis:
+# import pandas as pd
+# observations = pd.DataFrame(crabs.flatten())
+sea.close()  # also available as: with SeaTube(...) as sea:
 ```
 
-Re-running is safe — existing images are never re-extracted, and archive
-files are deleted after use unless you pass `--keep-videos`.
+Flat tables have one row per annotation/taxon pair, including an empty-taxon row for unlabelled records. Keep the raw annotation JSON and taxonomy cache with your dataset. Media JSONL indexes contain the source records; CSV indexes provide compact, one-row-per-output summaries. Repeated selections into one output directory preserve earlier indexed outputs and merge labels for the same media filename.
 
-## 7. Whole videos — `videos`
+A failed download or extraction raises an error. Temporary files are not published as completed media, and completed archive batches are indexed. Re-run the same selection after fixing the cause; completed nonempty outputs are reused. Existing user-supplied cache files are trusted, not checksum-verified. Do not run concurrent writers against the same output directory or taxonomy cache.
 
-When you want the footage itself, not stills:
+## If nothing matches
 
-```bash
-seatube videos --group crabs --max-files 3
-```
+1. Inspect `annotations.summary()` and `taxon_summary()` before filtering. Confirm dates, camera mode, and selected dive/camera IDs.
+2. Check whether the annotation resolution supports your question. A generic `Porifera` observation cannot satisfy a species-specific sponge search.
+3. Read `IncompleteTaxonomyWarning` and `sea.resolver.unresolved`. Offline caches, missing AphiaIDs, unavailable lineages, or failed WoRMS requests can omit matches. Retry with a new online `SeaTube` session after the problem is resolved.
+4. Compare matched versus mapped counts. Unmapped records cannot produce media; recording gaps never fall back to a nearby file or another identified camera.
+5. Broaden the date/location scope deliberately. A zero count describes the returned annotation set, not the absence of organisms in the ocean.
 
-Downloads the archive files referenced by the (filtered) annotations, skipping
-any already present.
-
-## One-liner recap
-
-```bash
-seatube fetch --start-date ... --end-date ...   # once, online
-seatube annotators                              # who
-seatube taxa --group crabs                      # what
-seatube clips --group crabs --window-seconds 60 # where in the video
-seatube images --group crabs --max-images 20    # the pictures themselves
-```
+To repeat analysis without network access, load a saved JSON file, construct `SeaTube(offline_taxa=True)` with its saved cache, and call only local search, summaries, exports, and planning with `check_sizes=False`. Discovery and `fetch()` remain online even when `offline_taxa=True`.

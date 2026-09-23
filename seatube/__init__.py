@@ -11,27 +11,39 @@ The pieces:
 """
 
 from .annotations import Annotation, AnnotationSet, ReviewFilters, Taxon
-from .client import OncClient
+from .client import OncClient, OncError
+from .clips import Clip, ClipDownloader, build_clips, select_clips
 from .fetch import AnnotationFetcher, FetchFilters, fixed_camera_locations
 from .images import Frame, ImageDownloader, build_frames, select_frames
-from .taxonomy import TAXON_GROUPS, WormsResolver
+from .taxonomy import TAXON_GROUPS, WormsResolver, organism_groups, IncompleteTaxonomyWarning
+from .research import SeaTube
+from .survey import run_survey
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "Annotation",
     "AnnotationFetcher",
     "AnnotationSet",
+    "Clip",
+    "ClipDownloader",
     "FetchFilters",
     "Frame",
     "ImageDownloader",
     "OncClient",
+    "OncError",
     "ReviewFilters",
+    "SeaTube",
     "TAXON_GROUPS",
     "Taxon",
     "WormsResolver",
+    "IncompleteTaxonomyWarning",
+    "build_clips",
     "build_frames",
     "fixed_camera_locations",
+    "organism_groups",
+    "run_survey",
+    "select_clips",
     "select_frames",
     "__version__",
 ]
