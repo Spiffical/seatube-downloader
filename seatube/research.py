@@ -8,7 +8,7 @@ from .annotations import AnnotationSet
 from .archive import parse_iso_utc
 from .client import OncClient
 from .clips import ClipDownloader
-from .fetch import AnnotationFetcher, FetchFilters, dives_in_range, fixed_camera_locations
+from .fetch import AnnotationFetcher, FetchFilters, cameras_in_range, dives_in_range, fixed_camera_locations
 from .images import ImageDownloader
 from .taxonomy import WormsResolver, organism_groups, search_terms
 
@@ -38,15 +38,28 @@ class SeaTube:
             raise ValueError("end_date must be on or after start_date")
         return dives_in_range(self.client, start, end)
 
+    def cameras(self, start_date: str, end_date: str, *, location_contains=None,
+                include_empty=False):
+        """Discover fixed-camera sites annotated in a date range (metadata only).
+
+        The fixed-camera counterpart of ``dives()``: pass a row's
+        ``searchTreeNodeId`` to ``fetch(node_ids={...})``. Rows count all
+        annotations and the WoRMS-labelled ones a default fetch keeps.
+        """
+        return cameras_in_range(self.client, parse_iso_utc(start_date), parse_iso_utc(end_date),
+                                location_contains=location_contains, include_empty=include_empty)
+
     def locations(self):
-        """Discover fixed-camera searchTreeNodeId values through ONC."""
+        """List every fixed-camera site in ONC's tree, annotated or not."""
         return fixed_camera_locations(self.client)
 
     def fetch(self, start_date: str, end_date: str, *, organisms=(), save_to=None, **filters):
         """Fetch annotation metadata and map it to video; never downloads video.
 
         Omit ``organisms`` to inventory all WoRMS-labelled observations in the
-        selected sources. Extra keywords are FetchFilters fields.
+        selected sources. Extra keywords are FetchFilters fields: pass
+        ``dive_ids`` for ROV dives or ``node_ids`` for fixed cameras, and the
+        camera mode follows; with neither, every dive in the range is scanned.
         """
         if organisms:
             if "groups" in filters or "taxon_names" in filters:

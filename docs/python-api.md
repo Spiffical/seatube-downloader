@@ -15,8 +15,9 @@ sea = SeaTube(token=None, data_dir="downloads", offline_taxa=False)
 | Method | Returns | Network / side effects |
 |---|---|---|
 | `groups(query="")` | Group dictionaries: `group`, `description`, `ancestors`, `aliases` | None |
-| `dives(start_date, end_date)` | ONC dive dictionaries, including `diveId` | ONC metadata |
-| `locations()` | Fixed-camera dictionaries, including `searchTreeNodeId` | ONC metadata |
+| `dives(start_date, end_date)` | ROV dive dictionaries overlapping the range, including `diveId` | ONC metadata |
+| `cameras(start_date, end_date, location_contains=None, include_empty=False)` | Fixed-camera sites annotated in the range: `searchTreeNodeId`, `locationCode`, `label`, `path`, `latitude`, `longitude`, `siteDepth`, `annotations`, `worms_annotations`, `first_utc`, `last_utc`; most WoRMS-labelled first | ONC metadata |
+| `locations()` | Every fixed-camera site in ONC's tree (`searchTreeNodeId`, `label`, `path`, position), annotated or not | ONC metadata |
 | `fetch(start_date, end_date, organisms=(), save_to=None, **filters)` | `AnnotationSet` | ONC metadata; WoRMS for organism filters; optional JSON save |
 | `search(annotations, organisms, **filters)` | A filtered `AnnotationSet` | WoRMS for uncached lineages |
 | `available_groups(annotations, include_empty=False)` | Count dictionaries, sorted by count | WoRMS for uncached lineages |
@@ -50,7 +51,7 @@ Load with `AnnotationSet.load(path)` or construct from raw dictionaries with `An
 
 - **Taxonomy:** `groups`, `taxa` (ancestor/scientific names), `taxon_contains` (label substring), `aphia_ids` (exact external IDs, no descendant expansion), `resolver`.
 - **People:** `creator`, `creator_id`, `creator_ids`, `creator_email`, `modifier`, `modifier_id`, `modifier_ids`, `modifier_email`. Names/emails use substring matching; IDs are exact. The plural ID filters accept a sequence of positive integer IDs, matching any within that list; `None` disables that filter and `[]` selects nothing. Author and last-editor conditions combine with AND, including when singular and plural ID filters are both supplied.
-- **Place/time:** `dive_contains`, `location_contains` (fixed-camera name/path), `camera_mode`, `start_date`, `end_date`, `min_depth_m`, `max_depth_m`.
+- **Place/time:** `dive_contains`, `location_contains` (fixed-camera label, path, or ONC location code), `camera_mode`, `start_date`, `end_date`, `min_depth_m`, `max_depth_m`. Fixed-camera records carry their site's nominal depth.
 - **Quality:** `review=ReviewFilters(...)`, `require_comment`.
 
 Within `groups` and `taxa`, names form a union. Other fields combine with AND; matching retains whole annotations, including their other taxa. Date and depth bounds are inclusive; missing measurements fail an active bound. Naive dates/timestamps are interpreted as UTC.
@@ -92,23 +93,22 @@ filters = FetchFilters(
 
 | Field | Default / interpretation |
 |---|---|
-| `camera_mode` | `"dive"`; alternatives `"stationary"`, `"both"` |
+| `camera_mode` | `None`: follows the selection — `node_ids`/`location_contains` mean `"stationary"`, `dive_ids` (or nothing) means `"dive"`, both mean `"both"`. A mode that contradicts the selection raises `ValueError` |
 | `taxonomy_code`, `taxonomy_id` | `"WoRMS"`, `None`; `taxonomy_code=None` disables the code constraint |
 | `taxon_ids` | Empty set; ONC-internal taxon IDs, **not** WoRMS AphiaIDs |
 | `groups`, `taxon_names` | Empty sequences; alternative to `organisms=` |
 | `creator_id`, `creator_name`, `creator_email` | No people constraint |
 | `modifier_id`, `modifier_name`, `modifier_email` | No modifier constraint |
 | `review` | `ReviewFilters()` |
-| `dive_ids`, `node_ids` | Empty sets; discover using `dives()` / `locations()` |
-| `location_contains` | No fixed-camera name/path constraint |
+| `dive_ids`, `node_ids` | Empty sets; discover using `dives()` / `cameras()`. Unknown fixed-camera node IDs raise `ValueError` |
+| `location_contains` | No constraint; otherwise fixed cameras whose label, path, or ONC location code contains the text |
 | `max_dives`, `max_stationary_locations` | No scan caps; caps select the first sources in sorted order |
 | `resolution` | `"L"`; `"H"` / `"S"` also supported |
-| `page_size` | `250`; positive integer |
-| `resolve_taxon_names` | `True`; resolves fixed-camera taxonomy records through ONC |
+| `page_size`, `resolve_taxon_names` | No longer used: fixed-camera records arrive complete from ONC's location service. Accepted for compatibility |
 
 Fetch configuration is validated before the scan. Failed annotation/taxonomy/video-metadata requests raise exceptions. Taxonomy classification failures at WoRMS produce `IncompleteTaxonomyWarning` and conservatively omit unconfirmed matches; inspect `resolver.unresolved`.
 
-`OncClient(token=None, timeout_seconds=45)` does not read `.env` by itself; use `from_env()` for that behavior. Methods include `list_dives()`, `dive_annotations(id)`, `dive_video_metadata(id, resolution)`, `fixed_camera_tree()`, `stationary_video_metadata(node_id, resolution)`, `annotation_detail(id)`, `taxon_detail(taxonomy_id, taxon_id)`, `archive_file_size(filename)`, and `download_archive_file(filename, output_path)`. `OncError` reports transport/API failures without credential-bearing request URLs. Transient GET/HEAD failures receive bounded retries; failed streamed downloads must be retried by the caller.
+`OncClient(token=None, timeout_seconds=45)` does not read `.env` by itself; use `from_env()` for that behavior. Methods include `list_dives()`, `dive_annotations(id)`, `dive_video_metadata(id, resolution)`, `fixed_camera_tree()`, `fixed_camera_details(node_id)` (its `stationCode` is the ONC location code), `location_annotations(location_code, start_date, end_date)`, `stationary_video_metadata(node_id, resolution)`, `annotation_detail(id)`, `taxon_detail(taxonomy_id, taxon_id)`, `archive_file_size(filename)`, and `download_archive_file(filename, output_path)`. `OncError` reports transport/API failures without credential-bearing request URLs; `status_code` holds ONC's in-payload status when there is one. Transient GET/HEAD failures receive bounded retries; failed streamed downloads must be retried by the caller.
 
 ## Taxonomy resolver
 

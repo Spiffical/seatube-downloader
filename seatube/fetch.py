@@ -13,30 +13,35 @@ from collections import defaultdict
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Collection, Dict, List, Optional, Sequence, Set, Tuple
 
 from .annotations import Annotation, AnnotationSet, ReviewFilters, person_matches
 from .archive import (
     archive_info_from_row,
-    data_file_row_containing,
+    media_row_containing,
     parse_iso_utc,
     select_media_file,
+    to_iso_utc,
 )
-from .client import BASE_URL, OncClient
+from .client import BASE_URL, OncClient, OncError
 from .taxonomy import WormsResolver, wanted_ancestor_names
 
-TAXONOMY_CODE_TO_ID = {"worms": 1, "cmecs": 2}
-TAXONOMY_ID_TO_CODE = {1: "WoRMS", 2: "CMECS"}
+NO_SEATUBE_VIDEO = 9001  # ONC's statusCode for a fixed-camera site without SeaTube video
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class FetchFilters:
-    """Everything that narrows a fetch, in one place."""
+    """Everything that narrows a fetch, in one place.
+
+    ``camera_mode`` defaults to what the IDs ask for: ``node_ids`` or
+    ``location_contains`` alone mean fixed cameras, ``dive_ids`` alone (or
+    nothing) means ROV dives, and both together mean both.
+    """
 
     start_date: str
     end_date: str
-    camera_mode: str = "dive"                      # dive | stationary | both
+    camera_mode: Optional[str] = None              # dive | stationary | both
 
     # what
     taxonomy_code: Optional[str] = "WoRMS"
@@ -56,13 +61,15 @@ class FetchFilters:
 
     # where
     dive_ids: Set[int] = field(default_factory=set)
-    node_ids: Set[int] = field(default_factory=set)
-    location_contains: Optional[str] = None
+    node_ids: Set[int] = field(default_factory=set)     # fixed-camera searchTreeNodeIds
+    location_contains: Optional[str] = None             # fixed-camera label/path/location code
     max_stationary_locations: Optional[int] = None
 
     # how
     resolution: str = "L"                          # H | L | S
     max_dives: Optional[int] = None
+    # No longer used: fixed-camera annotations now arrive whole from ONC's
+    # location service. Kept so existing calls and CLI flags still work.
     page_size: int = 250
     resolve_taxon_names: bool = True
 
@@ -71,8 +78,21 @@ class FetchFilters:
 
         if parse_iso_utc(self.end_date) < parse_iso_utc(self.start_date):
             raise ValueError("end_date must be on or after start_date")
+        wants_fixed = bool(self.node_ids or self.location_contains
+                           or self.max_stationary_locations is not None)
+        wants_dives = bool(self.dive_ids or self.max_dives is not None)
+        if self.camera_mode is None:
+            self.camera_mode = ("both" if wants_fixed and wants_dives
+                                else "stationary" if wants_fixed else "dive")
         if self.camera_mode not in {"dive", "stationary", "both"}:
             raise ValueError("camera_mode must be 'dive', 'stationary', or 'both'")
+        # Silently ignoring a selection would scan the wrong sources.
+        if self.camera_mode == "dive" and wants_fixed:
+            raise ValueError("node_ids, location_contains and max_stationary_locations select fixed "
+                             "cameras; use camera_mode='stationary' or 'both', or omit camera_mode")
+        if self.camera_mode == "stationary" and wants_dives:
+            raise ValueError("dive_ids and max_dives select ROV dives; use camera_mode='dive' "
+                             "or 'both', or omit camera_mode")
         if self.resolution not in {"H", "L", "S"}:
             raise ValueError("resolution must be 'H', 'L', or 'S'")
         for name in ("max_dives", "max_stationary_locations"):
@@ -92,20 +112,10 @@ class FetchFilters:
             return False
         return self.review.matches(ann)
 
-    def matches_taxonomy_ids(
-        self,
-        record: Dict[str, Any],
-        taxonomy_id_override: Optional[int] = None,
-    ) -> bool:
-        """The cheap taxonomy filter: code / taxonomy id / ONC taxon ids.
-
-        Stationary records pass ``taxonomy_id_override`` because their
-        taxonomy entries are built ONC-side and carry the numeric id even
-        when only a code was requested.
-        """
+    def matches_taxonomy_ids(self, record: Dict[str, Any]) -> bool:
+        """The cheap taxonomy filter: code / taxonomy id / ONC taxon ids."""
         code = self.effective_taxonomy_code()
-        taxonomy_id = taxonomy_id_override if taxonomy_id_override is not None else self.taxonomy_id
-        if not code and taxonomy_id is None and not self.taxon_ids:
+        if not code and self.taxonomy_id is None and not self.taxon_ids:
             return True
         taxons = record.get("taxons") or record.get("taxonomy") or []
         if not taxons:
@@ -113,7 +123,7 @@ class FetchFilters:
         for taxon in taxons:
             if code and str(taxon.get("taxonomyCode", "")).lower() != code.lower():
                 continue
-            if taxonomy_id is not None and int(taxon.get("taxonomyId", -1)) != taxonomy_id:
+            if self.taxonomy_id is not None and int(taxon.get("taxonomyId", -1)) != self.taxonomy_id:
                 continue
             if self.taxon_ids and int(taxon.get("taxonId", -1)) not in self.taxon_ids:
                 continue
@@ -156,30 +166,161 @@ def dives_in_range(
     return selected
 
 
+# ---------------------------------------------------------------------------
+# fixed-camera sites
+# ---------------------------------------------------------------------------
+
 def fixed_camera_locations(client: OncClient) -> List[Dict[str, Any]]:
-    """Flatten ONC's fixed-camera tree into (id, name, path) rows."""
-    leaves: List[Dict[str, Any]] = []
+    """Every camera site in ONC's fixed-camera tree, with a short unique ``label``.
+
+    Sites can contain sub-sites (Barkley Canyon Mid-East contains Wally
+    Land), so a node counts when ONC flags a device there, not only when it
+    is a leaf. Several sites share a name such as "Front Camera"; ``label``
+    is the shortest path suffix naming exactly one of them.
+    """
+    sites: List[Dict[str, Any]] = []
+    parts: List[List[str]] = []
 
     def walk(node: Dict[str, Any], path: List[str]) -> None:
         current_name = node.get("html")
         current_path = path + ([current_name] if current_name else [])
         children = node.get("children") or []
-        if children:
-            for child in children:
-                walk(child, current_path)
-            return
-        leaves.append({
-            "searchTreeNodeId": int(node.get("searchTreeNodeId")),
-            "name": node.get("html"),
-            "path": " > ".join(current_path),
-            "latitude": node.get("latitude"),
-            "longitude": node.get("longitude"),
-            "siteDepth": node.get("siteDepth"),
-        })
+        if node.get("searchTreeNodeId") is not None and (node.get("wasDeviceFound") or not children):
+            sites.append({
+                "searchTreeNodeId": int(node.get("searchTreeNodeId")),
+                "name": current_name,
+                "path": " > ".join(current_path),
+                "latitude": node.get("latitude"),
+                "longitude": node.get("longitude"),
+                "siteDepth": node.get("siteDepth"),
+            })
+            # The root ("Fixed Cameras") is common to every path.
+            parts.append(current_path[1:] or current_path or [str(node.get("searchTreeNodeId"))])
+        for child in children:
+            walk(child, current_path)
 
     walk(client.fixed_camera_tree(), [])
-    leaves.sort(key=lambda x: (x["path"], x["searchTreeNodeId"]))
-    return leaves
+    for site, label in zip(sites, _unique_suffixes(parts)):
+        site["label"] = label
+    sites.sort(key=lambda x: (x["path"], x["searchTreeNodeId"]))
+    return sites
+
+
+def _unique_suffixes(paths: List[List[str]]) -> List[str]:
+    labels = []
+    for parts in paths:
+        for k in range(1, len(parts) + 1):
+            if sum(other[-k:] == parts[-k:] for other in paths) == 1:
+                break
+        labels.append(" > ".join(parts[-k:]))
+    return labels
+
+
+def select_fixed_cameras(
+    client: OncClient,
+    node_ids: Collection[int] = (),
+    location_contains: Optional[str] = None,
+    max_locations: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Fixed-camera sites matching the selection, each with its ONC ``locationCode``.
+
+    ``location_contains`` matches the label, tree path, or location code.
+    Unknown node ids raise instead of quietly selecting nothing.
+    """
+    sites = fixed_camera_locations(client)
+    if node_ids:
+        wanted = {int(n) for n in node_ids}
+        unknown = sorted(wanted - {s["searchTreeNodeId"] for s in sites})
+        if unknown:
+            raise ValueError(f"Unknown fixed-camera node id(s) {unknown}. "
+                             "List valid ids with sea.cameras(...) or `seatube cameras`.")
+        sites = [s for s in sites if s["searchTreeNodeId"] in wanted]
+
+    def lookup_codes(rows: List[Dict[str, Any]]) -> None:
+        for site in rows:
+            if "locationCode" in site:
+                continue
+            try:
+                details = client.fixed_camera_details(site["searchTreeNodeId"])
+            except Exception as exc:
+                raise RuntimeError(f"Could not look up fixed camera {site['label']}: {exc}") from exc
+            site["locationCode"] = details.get("stationCode")
+
+    if location_contains:
+        lookup_codes(sites)  # codes are matchable too, e.g. "CCIP"
+        needle = location_contains.lower()
+        sites = [s for s in sites
+                 if needle in " ".join(str(s.get(k) or "") for k in ("label", "path", "locationCode")).lower()]
+    if max_locations is not None:
+        sites = sites[:max_locations]
+    lookup_codes(sites)
+    return sites
+
+
+def site_annotations(
+    client: OncClient,
+    site: Dict[str, Any],
+    start_dt: datetime,
+    end_dt: datetime,
+) -> List[Dict[str, Any]]:
+    """Raw annotations for one fixed-camera site whose start lies in the range."""
+    code = site.get("locationCode")
+    if not code:
+        logger.warning(f"ONC gives no location code for fixed camera {site['label']}; skipped")
+        return []
+    try:
+        raw = client.location_annotations(code, to_iso_utc(start_dt), to_iso_utc(end_dt))
+    except Exception as exc:
+        raise RuntimeError(f"Could not fetch annotations for fixed camera {site['label']} ({code}): {exc}") from exc
+    kept = []
+    for ann in raw:
+        try:
+            ts = parse_iso_utc(ann.get("dateFrom") or "")
+        except (TypeError, ValueError):
+            continue
+        if start_dt <= ts <= end_dt:
+            kept.append(ann)
+    return kept
+
+
+def _has_worms_taxon(ann: Dict[str, Any]) -> bool:
+    return any(str(t.get("taxonomyCode") or "").lower() == "worms" for t in ann.get("taxons") or [])
+
+
+def cameras_in_range(
+    client: OncClient,
+    start_dt: datetime,
+    end_dt: datetime,
+    *,
+    node_ids: Collection[int] = (),
+    location_contains: Optional[str] = None,
+    include_empty: bool = False,
+) -> List[Dict[str, Any]]:
+    """Fixed-camera sites annotated in the range -- the counterpart of ``dives_in_range``.
+
+    Each row is a site from ``fixed_camera_locations`` plus ``locationCode``,
+    ``annotations`` (all of them), ``worms_annotations`` (those with a WoRMS
+    taxon, which a default fetch keeps) and the first/last annotation times.
+    Sorted by WoRMS-labelled count. Whether video exists is checked by the
+    fetch, which reports mapped versus unmapped annotations.
+    """
+    if end_dt < start_dt:
+        raise ValueError("end_date must be on or after start_date")
+    rows = []
+    for site in select_fixed_cameras(client, node_ids, location_contains):
+        anns = site_annotations(client, site, start_dt, end_dt)
+        if not anns and not include_empty:
+            continue
+        times = sorted(a["dateFrom"] for a in anns)
+        rows.append({
+            **site,
+            "annotations": len(anns),
+            "worms_annotations": sum(_has_worms_taxon(a) for a in anns),
+            "first_utc": times[0] if times else None,
+            "last_utc": times[-1] if times else None,
+        })
+    rows.sort(key=lambda r: (-r["worms_annotations"], -r["annotations"], r["label"]))
+    return rows
 
 
 def seatube_link(resource_type_id: int, resource_id: int, annotation_id: int, ann_start: str) -> str:
@@ -189,13 +330,64 @@ def seatube_link(resource_type_id: int, resource_id: int, annotation_id: int, an
     )
 
 
+def fixed_camera_link(search_tree_node_id: int, ann_start: str) -> str:
+    """The SeaTube fixed-camera player, cued to the annotation instant."""
+    return f"{BASE_URL}/app/fixed-camera-locations/{search_tree_node_id}?time={ann_start}"
+
+
 def _normalized_user(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     raw = raw or {}
+    user_id = raw.get("userId") if raw.get("userId") is not None else raw.get("dmasUserId")
+    if user_id is None and raw.get("userCode") not in (None, ""):
+        try:
+            user_id = int(raw["userCode"])  # the location service sends IDs as strings
+        except (TypeError, ValueError):
+            user_id = None
     return {
-        "userId": raw.get("userId") if raw.get("userId") is not None else raw.get("dmasUserId"),
+        "userId": user_id,
         "firstName": raw.get("firstName") if raw.get("firstName") is not None else raw.get("firstname"),
         "lastName": raw.get("lastName") if raw.get("lastName") is not None else raw.get("lastname"),
         "email": raw.get("email"),
+    }
+
+
+def stationary_record(ann: Dict[str, Any], site: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize a location-service annotation to the package's record shape."""
+    ann_start = ann.get("dateFrom")
+    return {
+        "cameraMode": "stationary",
+        "annotationId": int(ann.get("annotationId") or 0),
+        "diveId": None,
+        "diveName": None,
+        "cruiseName": None,
+        "stationarySearchTreeNodeId": site["searchTreeNodeId"],
+        "stationaryLocationName": site["label"],
+        "stationaryLocationPath": site["path"],
+        "stationaryLocationCode": site.get("locationCode"),
+        "startDate": ann_start,
+        "endDate": ann.get("dateTo"),
+        "comment": str(ann.get("comment") or "").strip(),
+        "annotationSource": ann.get("annotationSource"),
+        "createdBy": _normalized_user(ann.get("createdBy")),
+        "modifiedBy": _normalized_user(ann.get("modifiedBy")),
+        "createdDate": ann.get("createdDate"),
+        "modifiedDate": ann.get("modifiedDate"),
+        "taxonomy": ann.get("taxons") or [],
+        "videoResourceId": None,                    # the device id, once mapped
+        "videoResourceTypeId": 1000,
+        "resourceTypeId": ann.get("resourceTypeId"),
+        "resourceTypeName": None,
+        "deviceId": None,
+        "deviceCode": ann.get("deviceCode"),
+        # A fixed camera sits at its site; ONC's site depth is negative above sea level.
+        "lat": site.get("latitude"),
+        "lon": site.get("longitude"),
+        "depth": site.get("siteDepth"),
+        "heading": None,
+        "toBeReviewed": ann.get("toBeReviewed"),
+        "numPositiveReviews": ann.get("numPositiveReviews"),
+        "numTotalReviews": ann.get("numTotalReviews"),
+        "contextualLink": fixed_camera_link(site["searchTreeNodeId"], ann_start),
     }
 
 
@@ -220,13 +412,11 @@ class AnnotationFetcher:
             raise ValueError("end_date must be after start_date")
 
         records: List[Dict[str, Any]] = []
-        stationary_media: Dict[int, Dict[str, Any]] = {}
 
         if filters.camera_mode in ("dive", "both"):
             records.extend(self._dive_records(filters, start_dt, end_dt))
         if filters.camera_mode in ("stationary", "both"):
-            stationary_records, stationary_media = self._stationary_records(filters, start_dt, end_dt)
-            records.extend(stationary_records)
+            records.extend(self._stationary_records(filters, start_dt, end_dt))
 
         logger.info(f"\nMatched annotations across selected modes: {len(records)}")
 
@@ -245,7 +435,7 @@ class AnnotationFetcher:
 
         logger.info("Mapping annotations to archive video files (strict containment)...")
         self._attach_dive_archive_info(records, filters.resolution)
-        self._attach_stationary_archive_info(records, stationary_media, filters.resolution)
+        self._attach_stationary_archive_info(records, filters.resolution)
         mapped = sum(1 for r in records if r.get("archiveFilename"))
         logger.info(f"{mapped}/{len(records)} annotations mapped to an archive file")
 
@@ -342,211 +532,26 @@ class AnnotationFetcher:
         filters: FetchFilters,
         start_dt: datetime,
         end_dt: datetime,
-    ) -> Tuple[List[Dict[str, Any]], Dict[int, Dict[str, Any]]]:
-        all_locations = fixed_camera_locations(self.client)
-
-        selected = []
-        needle = (filters.location_contains or "").lower() or None
-        for loc in all_locations:
-            node_id = int(loc["searchTreeNodeId"])
-            if filters.node_ids and node_id not in filters.node_ids:
-                continue
-            if needle and needle not in f"{loc.get('name','')} {loc.get('path','')}".lower():
-                continue
-            selected.append(loc)
-        if not filters.node_ids and not needle:
-            selected = all_locations
-        if filters.max_stationary_locations is not None:
-            selected = selected[: filters.max_stationary_locations]
-
-        logger.info(f"Fixed-camera locations selected: {len(selected)} (of {len(all_locations)})")
-        if not selected:
-            return [], {}
-
-        media_by_device: Dict[int, Dict[str, Any]] = {}
-        location_by_device: Dict[int, Dict[str, Any]] = {}
-        for loc in selected:
-            payload = self.client.stationary_video_metadata(
-                int(loc["searchTreeNodeId"]), filters.resolution
-            )
-            for media_file in payload.get("mediaFiles", []) or []:
-                device_id = int(media_file.get("deviceId", 0))
-                if device_id <= 0:
-                    continue
-                existing = media_by_device.get(device_id)
-                if existing is None or int(media_file.get("count", 0) or 0) > int(existing.get("count", 0) or 0):
-                    media_by_device[device_id] = media_file
-                    location_by_device[device_id] = loc
-
-        device_ids = sorted(media_by_device)
-        logger.info(f"Stationary devices with video data: {len(device_ids)}")
+    ) -> List[Dict[str, Any]]:
+        sites = select_fixed_cameras(
+            self.client, filters.node_ids, filters.location_contains, filters.max_stationary_locations,
+        )
+        logger.info(f"Fixed-camera sites selected: {len(sites)}")
 
         matched: List[Dict[str, Any]] = []
-        detail_cache: Dict[int, Dict[str, Any]] = {}
-        taxon_cache: Dict[Tuple[int, int], Optional[Dict[str, Any]]] = {}
-
-        for idx, device_id in enumerate(device_ids, start=1):
-            try:
-                candidates = self._stationary_candidates(device_id, filters)
-            except Exception as exc:
-                raise RuntimeError(f"Could not fetch annotations for device {device_id}: {exc}") from exc
-
-            loc = location_by_device.get(device_id) or {}
-            for naive in candidates:
-                ann_id = int(naive.get("annotationId", 0))
-                if ann_id <= 0:
+        for index, site in enumerate(sites, start=1):
+            for ann in site_annotations(self.client, site, start_dt, end_dt):
+                record = stationary_record(ann, site)
+                if not filters.matches_people_and_reviews(Annotation(record)):
                     continue
-                detail = detail_cache.get(ann_id)
-                if detail is None:
-                    try:
-                        detail = self.client.annotation_detail(ann_id)
-                    except Exception as exc:
-                        raise RuntimeError(f"Could not fetch annotation {ann_id}: {exc}") from exc
-                    detail_cache[ann_id] = detail
-
-                ann_start = detail.get("startDate") or naive.get("startDate")
-                if not ann_start:
-                    continue
-                try:
-                    ts = parse_iso_utc(ann_start)
-                except Exception:
-                    continue
-                if ts < start_dt or ts > end_dt:
-                    continue
-
-                taxonomy = []
-                for content in detail.get("annotationContents") or []:
-                    t_id, x_id = content.get("taxonomyId"), content.get("taxonId")
-                    if t_id in (None, 0) and x_id in (None, 0):
-                        continue
-                    taxonomy.append(self._taxonomy_entry(content, taxon_cache, filters.resolve_taxon_names))
-
-                source = detail.get("annotationSource")
-                record = {
-                    "cameraMode": "stationary",
-                    "annotationId": ann_id,
-                    "diveId": None,
-                    "diveName": None,
-                    "cruiseName": None,
-                    "stationarySearchTreeNodeId": loc.get("searchTreeNodeId"),
-                    "stationaryLocationName": loc.get("name"),
-                    "stationaryLocationPath": loc.get("path"),
-                    "startDate": ann_start,
-                    "endDate": detail.get("endDate") or naive.get("endDate"),
-                    "comment": (naive.get("annotationSummary") or "").strip(),
-                    "annotationSource": source.get("annotationSource") if isinstance(source, dict) else source,
-                    "createdBy": _normalized_user(detail.get("createdBy")),
-                    "modifiedBy": _normalized_user(detail.get("modifiedBy")),
-                    "createdDate": detail.get("createdDate"),
-                    "modifiedDate": detail.get("modifiedDate"),
-                    "taxonomy": taxonomy,
-                    "videoResourceId": naive.get("resourceId"),
-                    "videoResourceTypeId": (detail.get("resourceType") or {}).get("resourceTypeId"),
-                    "resourceTypeId": (detail.get("resourceType") or {}).get("resourceTypeId"),
-                    "resourceTypeName": (detail.get("resourceType") or {}).get("resourceTypeName"),
-                    "deviceId": naive.get("resourceId"),
-                    "lat": naive.get("lat"),
-                    "lon": naive.get("lon"),
-                    "depth": None,
-                    "heading": None,
-                    "toBeReviewed": detail.get("toBeReviewed", naive.get("toBeReviewed")),
-                    "numPositiveReviews": detail.get("numPositiveReviews", naive.get("numPositiveReviews")),
-                    "numTotalReviews": detail.get("numTotalReviews", naive.get("numTotalReviews")),
-                    "contextualLink": naive.get("contextualLink")
-                    or seatube_link(1000, int(naive.get("resourceId", 0)), ann_id, ann_start),
-                }
-
-                wrapped = Annotation(record)
-                if not filters.matches_people_and_reviews(wrapped):
-                    continue
-                taxonomy_id = filters.taxonomy_id
-                if taxonomy_id is None:
-                    code = filters.effective_taxonomy_code()
-                    taxonomy_id = TAXONOMY_CODE_TO_ID.get(code.lower()) if code else None
-                if not filters.matches_taxonomy_ids(record, taxonomy_id_override=taxonomy_id):
+                if not filters.matches_taxonomy_ids(record):
                     continue
                 matched.append(record)
+            if index % 10 == 0 or index == len(sites):
+                logger.info(f"  {index}/{len(sites)} sites scanned; matched so far: {len(matched)}")
 
-            if idx % 5 == 0 or idx == len(device_ids):
-                logger.info(f"  {idx}/{len(device_ids)} devices scanned; matched so far: {len(matched)}")
-
-        logger.info(f"Matched stationary annotations after filters: {len(matched)}")
-        return matched, media_by_device
-
-    def _stationary_candidates(self, device_id: int, filters: FetchFilters) -> List[Dict[str, Any]]:
-        rows: List[Dict[str, Any]] = []
-        page_num = 1
-        while True:
-            payload = self.client.stationary_annotation_page(
-                device_id=device_id,
-                start_date=filters.start_date,
-                end_date=filters.end_date,
-                page_num=page_num,
-                page_size=filters.page_size,
-                user_id=filters.creator_id,
-            )
-            batch = payload.get("naiveAnnotationList", []) or []
-            if not batch:
-                break
-            rows.extend(batch)
-            total_pages = payload.get("totalNumOfPages")
-            if total_pages is not None and page_num >= int(total_pages):
-                break
-            if total_pages is None and len(batch) < filters.page_size:
-                break
-            page_num += 1
-        return rows
-
-    def _taxonomy_entry(
-        self,
-        content: Dict[str, Any],
-        cache: Dict[Tuple[int, int], Optional[Dict[str, Any]]],
-        resolve_name: bool,
-    ) -> Dict[str, Any]:
-        """Resolve one stationary annotationContents entry to a taxonomy record."""
-        taxonomy_id = content.get("taxonomyId")
-        taxon_id = content.get("taxonId")
-        raw_label = str(content.get("annotation") or "").strip()
-        label = raw_label if raw_label.lower() not in {"", "taxon"} else None
-        entry: Dict[str, Any] = {
-            "taxonomyCode": TAXONOMY_ID_TO_CODE.get(int(taxonomy_id)) if taxonomy_id is not None else None,
-            "taxonomyId": taxonomy_id,
-            "taxonId": taxon_id,
-            "displayText": label,
-            "taxonUrl": None,
-            "attributes": content.get("annotationAttributes") or [],
-            "resolutionStatus": "annotation_label" if label else "unresolved",
-        }
-        if not resolve_name or taxonomy_id in (None, 0) or taxon_id in (None, 0):
-            return entry
-
-        key = (int(taxonomy_id), int(taxon_id))
-        if key not in cache:
-            try:
-                cache[key] = self.client.taxon_detail(*key)
-            except Exception as exc:
-                raise RuntimeError(f"Could not resolve ONC taxonomy {key}: {exc}") from exc
-
-        record = cache[key]
-        if not record:
-            entry["resolutionStatus"] = "lookup_failed"
-            return entry
-
-        external = record.get("jsonTaxonData") or {}
-        entry.update({
-            "displayText": record.get("commonName")
-            or external.get("scientificname")
-            or external.get("valid_name")
-            or label,
-            "taxonUrl": record.get("referenceUrl") or external.get("url"),
-            "referenceId": record.get("referenceId"),
-            "rank": external.get("rank"),
-            "scientificName": external.get("scientificname"),
-            "validName": external.get("valid_name"),
-            "englishNames": record.get("englishNames") or [],
-            "resolutionStatus": "onc_taxonomy",
-        })
-        return entry
+        logger.info(f"Matched fixed-camera annotations after filters: {len(matched)}")
+        return matched
 
     # ------------------------------------------------------------------
     # archive-file mapping
@@ -564,39 +569,50 @@ class AnnotationFetcher:
             except Exception as exc:
                 raise RuntimeError(f"Could not fetch video metadata for dive {dive_id}: {exc}") from exc
             media_files = video_meta.get("mediaFiles", []) or []
-            if not media_files:
-                for record in anns:
-                    record["videoMappingStatus"] = "no_media_for_device"
-                continue
             for record in anns:
-                self._attach_archive_info(
-                    record, select_media_file(media_files, record.get("deviceId")), resolution
-                )
+                media_file = select_media_file(media_files, record.get("deviceId"))
+                self._attach_archive_info(record, [media_file] if media_file else [], resolution)
 
-    def _attach_stationary_archive_info(
-        self,
-        records: List[Dict[str, Any]],
-        media_by_device: Dict[int, Dict[str, Any]],
-        resolution: str,
-    ) -> None:
+    def _attach_stationary_archive_info(self, records: List[Dict[str, Any]], resolution: str) -> None:
+        """Map each annotation within its own site's recordings.
+
+        Cameras move between sites, so only the site that reported the
+        annotation is searched, across every deployment of that device.
+        """
+        by_site: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
         for record in records:
-            if record.get("cameraMode") != "stationary" or record.get("deviceId") is None:
-                continue
-            self._attach_archive_info(
-                record, media_by_device.get(int(record["deviceId"])), resolution
-            )
+            if record.get("cameraMode") == "stationary" and record.get("stationarySearchTreeNodeId") is not None:
+                by_site[int(record["stationarySearchTreeNodeId"])].append(record)
+
+        for node_id, anns in by_site.items():
+            label = anns[0].get("stationaryLocationName") or node_id
+            try:
+                media_files = self.client.stationary_video_metadata(node_id, resolution).get("mediaFiles", []) or []
+            except OncError as exc:
+                if exc.status_code != NO_SEATUBE_VIDEO:
+                    raise RuntimeError(f"Could not fetch video metadata for fixed camera {label}: {exc}") from exc
+                logger.warning(f"SeaTube lists no video for fixed camera {label}; "
+                               f"its {len(anns)} annotation(s) stay unmapped")
+                media_files = []
+            except Exception as exc:
+                raise RuntimeError(f"Could not fetch video metadata for fixed camera {label}: {exc}") from exc
+            for record in anns:
+                own = _device_media(media_files, record)
+                if own and record.get("deviceId") is None:
+                    record["deviceId"] = record["videoResourceId"] = own[0].get("deviceId")
+                self._attach_archive_info(record, own, resolution)
 
     @staticmethod
     def _attach_archive_info(
         record: Dict[str, Any],
-        media_file: Optional[Dict[str, Any]],
+        media_files: Sequence[Dict[str, Any]],
         resolution: str,
     ) -> None:
         ann_start = record.get("startDate")
-        if not media_file or not ann_start:
-            record["videoMappingStatus"] = "no_media_for_device" if not media_file else "missing_timestamp"
+        if not media_files or not ann_start:
+            record["videoMappingStatus"] = "no_media_for_device" if not media_files else "missing_timestamp"
             return
-        row = data_file_row_containing(media_file, parse_iso_utc(ann_start))
+        media_file, row = media_row_containing(media_files, parse_iso_utc(ann_start))
         if not row:
             record["videoMappingStatus"] = "no_containing_data_file"
             return
@@ -604,3 +620,13 @@ class AnnotationFetcher:
         record["videoMappingStatus"] = "strict_containment"
         record["resolution"] = resolution
         record["videoDeviceCode"] = media_file.get("deviceCode")
+
+
+def _device_media(media_files: Sequence[Dict[str, Any]], record: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The media series recorded by this annotation's camera -- never another one."""
+    code, device_id = record.get("deviceCode"), record.get("deviceId")
+    if code:
+        return [m for m in media_files if m.get("deviceCode") == code]
+    if device_id is not None:
+        return [m for m in media_files if m.get("deviceId") == device_id]
+    return []
