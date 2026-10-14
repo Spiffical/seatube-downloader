@@ -2,6 +2,7 @@
 
 CI runs validation without credentials. For a real local run:
     python scripts/check_notebook.py --execute --download-media
+    python scripts/check_notebook.py --execute --download-media --source stationary
 Executed output is written under ignored downloads/, never over the source notebook.
 """
 import argparse
@@ -20,9 +21,11 @@ def main():
     parser.add_argument("--execute", action="store_true", help="Query live ONC data using ONC_TOKEN")
     parser.add_argument("--download-media", action="store_true", help="Also extract from one real archive")
     parser.add_argument("--env-file", type=Path, help="Read ONC_TOKEN from this private .env file")
+    parser.add_argument("--source", choices=["dive", "stationary"], default="dive",
+                        help="Run the ROV-dive (default) or fixed-camera example")
     args = parser.parse_args()
-    if (args.download_media or args.env_file) and not args.execute:
-        parser.error("--download-media and --env-file require --execute")
+    if (args.download_media or args.env_file or args.source != "dive") and not args.execute:
+        parser.error("--download-media, --env-file and --source require --execute")
     root = Path(__file__).resolve().parents[1]
     notebook = nbformat.read(root / "examples" / "research_walkthrough.ipynb", as_version=4)
     nbformat.validate(notebook)
@@ -43,10 +46,15 @@ def main():
              os.environ.get("ONC_TOKEN") or dotenv_values(env_file).get("ONC_TOKEN"))
     if not token:
         parser.error("ONC_TOKEN is missing. Follow the token setup instructions in the notebook.")
+    parameters = [c for c in notebook.cells if "parameters" in c.metadata.get("tags", [])]
+    if len(parameters) != 1:
+        raise RuntimeError("Expected exactly one notebook configuration cell")
+    default_source = 'SOURCE = "dive"'
+    if default_source not in parameters[0].source:
+        raise RuntimeError(f"Expected {default_source!r} in the notebook configuration cell")
+    # Replace rather than append: the example dates are chosen from SOURCE in the same cell.
+    parameters[0].source = parameters[0].source.replace(default_source, f'SOURCE = "{args.source}"', 1)
     if args.download_media:
-        parameters = [c for c in notebook.cells if "parameters" in c.metadata.get("tags", [])]
-        if len(parameters) != 1:
-            raise RuntimeError("Expected exactly one notebook configuration cell")
         parameters[0].source += "\nDOWNLOAD_MEDIA = True  # Enabled for this verification run."
 
     # Use this interpreter without installing a global Jupyter kernel.
@@ -78,11 +86,12 @@ def main():
     serialized = nbformat.writes(notebook)
     if token in serialized:
         raise RuntimeError("Refusing to save notebook output containing a credential")
-    output = root / "downloads" / "research_walkthrough" / "verified.ipynb"
+    name = "verified.ipynb" if args.source == "dive" else f"verified_{args.source}.ipynb"
+    output = root / "downloads" / "research_walkthrough" / name
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(serialized, encoding="utf-8")
-    print("Notebook executed successfully against live ONC data.")
-    print("Executed notebook saved to downloads/research_walkthrough/verified.ipynb")
+    print(f"Notebook ({args.source} example) executed successfully against live ONC data.")
+    print(f"Executed notebook saved to downloads/research_walkthrough/{name}")
 
 
 if __name__ == "__main__":

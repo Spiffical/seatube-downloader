@@ -78,6 +78,22 @@ def data_file_row_containing(
     return None
 
 
+def media_row_containing(
+    media_files: Sequence[Dict[str, Any]],
+    when: datetime,
+) -> Tuple[Optional[Dict[str, Any]], Optional[Sequence[str]]]:
+    """Search every media series (e.g. each deployment of one fixed camera).
+
+    A device that was recovered and redeployed has one series per
+    deployment, so checking only one of them leaves the others unmapped.
+    """
+    for media_file in media_files:
+        row = data_file_row_containing(media_file, when)
+        if row:
+            return media_file, row
+    return None, None
+
+
 def archive_info_from_row(media_file: Dict[str, Any], row: Sequence[str]) -> Dict[str, Any]:
     """Fields describing the archive file a data-file row points at.
 

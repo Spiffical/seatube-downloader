@@ -10,7 +10,8 @@
     videos      download whole archive video files
     groups      the broad taxon-group vocabulary
     dives       ROV dives in a date range, with their ids
-    locations   fixed-camera location ids
+    cameras     fixed cameras annotated in a date range, with their ids
+    locations   every fixed-camera site id, annotated or not
 
 Local exploration uses saved annotations. Lineage matching may query WoRMS;
 metadata discovery, size estimates and media downloads use ONC.
@@ -30,7 +31,8 @@ from .annotations import AnnotationSet, ReviewFilters
 from .client import OncClient
 from .clips import ClipDownloader
 from .archive import parse_iso_utc
-from .fetch import AnnotationFetcher, FetchFilters, dives_in_range, fixed_camera_locations
+from .fetch import (AnnotationFetcher, FetchFilters, cameras_in_range, dives_in_range,
+                    fixed_camera_locations)
 from .images import ImageDownloader, archive_path, build_frames, select_frames, validate_limit
 from .taxonomy import WormsResolver, format_group_table, normalize_group_name
 
@@ -63,7 +65,7 @@ def add_offline_filter_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--min-total-reviews", type=int)
     group.add_argument("--require-comment", action="store_true")
     group.add_argument("--dive-name-contains")
-    group.add_argument("--location-contains")
+    group.add_argument("--location-contains", help="Fixed-camera name, path or ONC location code")
     group.add_argument("--camera-mode", choices=["dive", "stationary"],
                        help="Keep only one camera mode")
 
@@ -422,11 +424,40 @@ def cmd_dives(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_cameras(args: argparse.Namespace) -> int:
+    client = OncClient(args.token)
+    client.require_token()
+    cameras = cameras_in_range(
+        client, parse_iso_utc(args.start_date), parse_iso_utc(args.end_date),
+        location_contains=args.location_contains, include_empty=args.include_empty,
+    )
+    rows = [
+        {
+            "node_id": c["searchTreeNodeId"],
+            "code": c.get("locationCode") or "",
+            "camera": c["label"],
+            "worms": c["worms_annotations"],
+            "annotations": c["annotations"],
+            "first": (c["first_utc"] or "")[:10],
+            "last": (c["last_utc"] or "")[:10],
+            "depth_m": c.get("siteDepth") if c.get("siteDepth") is not None else "",
+        }
+        for c in cameras
+    ]
+    print_table(rows, ["node_id", "code", "camera", "worms", "annotations", "first", "last", "depth_m"],
+                args.limit or None)
+    print("\n'worms' counts WoRMS-labelled annotations, which a default fetch keeps.")
+    print("Use a node_id with `seatube fetch --node-id <id>`.")
+    return 0
+
+
 def cmd_locations(args: argparse.Namespace) -> int:
     client = OncClient(args.token)
     locations = fixed_camera_locations(client)
-    rows = [{"id": loc["searchTreeNodeId"], "path": loc["path"]} for loc in locations]
-    print_table(rows, ["id", "path"], args.limit or None)
+    rows = [{"node_id": loc["searchTreeNodeId"], "camera": loc["label"], "path": loc["path"]}
+            for loc in locations]
+    print_table(rows, ["node_id", "camera", "path"], args.limit or None)
+    print("\nSee which of these were annotated in a date range with `seatube cameras`.")
     return 0
 
 
@@ -465,7 +496,9 @@ def build_parser() -> argparse.ArgumentParser:
     # fetch
     p = sub.add_parser("fetch", help="pull filtered annotations from ONC into a local file")
     add_date_args(p)
-    p.add_argument("--camera-mode", choices=["dive", "stationary", "both"], default="dive")
+    p.add_argument("--camera-mode", choices=["dive", "stationary", "both"],
+                   help="ROV dives, fixed cameras, or both (default: follows --dive-id/--node-id; "
+                        "dives when neither is given)")
     p.add_argument("--group", action="append", default=[], metavar="NAME",
                    help="Broad taxon group, repeatable (see `seatube groups`)")
     p.add_argument("--taxon-name", action="append", default=[], metavar="TAXON",
@@ -486,14 +519,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-positive-review-rate", type=float)
     p.add_argument("--require-cross-review", action="store_true")
     p.add_argument("--dive-id", help="Comma-separated dive ids")
-    p.add_argument("--search-tree-node-id", help="Comma-separated fixed-camera node ids")
-    p.add_argument("--location-name-contains")
+    p.add_argument("--node-id", "--search-tree-node-id", dest="search_tree_node_id",
+                   help="Comma-separated fixed-camera node ids (see `seatube cameras`)")
+    p.add_argument("--location-name-contains",
+                   help="Fixed cameras whose name, path or ONC location code contains this")
     p.add_argument("--max-stationary-locations", type=int)
     p.add_argument("--resolution", choices=["H", "L", "S"], default="L",
                    help="Video resolution the annotations map onto (default L)")
     p.add_argument("--max-dives", type=int)
-    p.add_argument("--page-size", type=int, default=250)
-    p.add_argument("--skip-taxon-name-resolution", action="store_true")
+    p.add_argument("--page-size", type=int, default=250, help=argparse.SUPPRESS)  # no longer used
+    p.add_argument("--skip-taxon-name-resolution", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--output-dir", default="downloads")
     p.add_argument("--flat-exports", action="store_true",
                    help="Also write one-row-per-taxon CSV and JSONL")
@@ -584,7 +619,14 @@ def build_parser() -> argparse.ArgumentParser:
     common(p)
     p.set_defaults(func=cmd_dives)
 
-    p = sub.add_parser("locations", help="fixed-camera location ids")
+    p = sub.add_parser("cameras", help="fixed cameras annotated in a date range, with their ids")
+    add_date_args(p)
+    p.add_argument("--location-contains", help="Only cameras whose name, path or location code contains this")
+    p.add_argument("--include-empty", action="store_true", help="Also list cameras without annotations")
+    common(p)
+    p.set_defaults(func=cmd_cameras)
+
+    p = sub.add_parser("locations", help="every fixed-camera site id, annotated or not")
     common(p)
     p.set_defaults(func=cmd_locations)
 

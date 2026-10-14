@@ -1,6 +1,6 @@
 # Find organisms, frames, and clips with Python
 
-This guide is for researchers using a notebook or a Python script. First install the package and configure an ONC token as described in the [README](../README.md). You only need ffmpeg when extracting media. The [notebook](../examples/research_walkthrough.ipynb) walks through a real dive, starting with ONC registration and token setup. It queries live metadata by default; media downloads are optional.
+This guide is for researchers using a notebook or a Python script. First install the package and configure an ONC token as described in the [README](../README.md). You only need ffmpeg when extracting media. The [notebook](../examples/research_walkthrough.ipynb) walks through a real ROV dive or fixed camera, starting with ONC registration and token setup. It queries live metadata by default; media downloads are optional.
 
 ## 1. Choose your biological search
 
@@ -18,17 +18,22 @@ A group is a rule for matching a taxonomic lineage. It is not an inventory of av
 
 ## 2. Find places and dates
 
-Choose a small date range for the first fetch. Listing dives returns ONC IDs, names, dates, and other metadata:
+SeaTube video comes from **ROV dives** (an expedition surveys a site for hours) and **fixed cameras** (an observatory camera records the same view on a schedule for months or years). Discover either kind with a date range. Start small for a first fetch.
 
 ```python
+# ROV dives overlapping the range: ONC IDs, names, dates, and other metadata.
 dives = sea.dives("2019-07-06T00:00:00Z", "2019-07-06T23:59:59Z")
 for dive in dives:
     print(dive["diveId"], dive.get("referenceDiveId"), dive.get("dateFrom"))
 
-locations = sea.locations()  # fixed-camera tree, not a list of organism occurrences
-for location in locations[:5]:
-    print(location["searchTreeNodeId"], location["path"])
+# Fixed cameras annotated in the range, most WoRMS-labelled annotations first.
+cameras = sea.cameras("2022-02-01T00:00:00Z", "2022-02-28T23:59:59Z")
+for camera in cameras:
+    print(camera["searchTreeNodeId"], camera["locationCode"], camera["label"],
+          camera["worms_annotations"], camera["annotations"], camera["siteDepth"])
 ```
+
+Each camera row has the site's `searchTreeNodeId` (pass it to `fetch(node_ids=...)`), its ONC `locationCode`, a short unique `label`, the tree `path`, position, and `siteDepth`. `annotations` counts every annotation at the site; `worms_annotations` counts those with a WoRMS taxon, which organism searches use. Many fixed-camera annotations are comments only, such as current direction. `include_empty=True` also lists cameras without annotations, and `location_contains="Barkley"` narrows by label, path, or location code. `sea.locations()` lists every site in ONC's fixed-camera tree without counting anything.
 
 If you need to scout a longer period, `run_survey()` orders ONC’s STEXPORT annotation product and summarizes its scopes and annotators:
 
@@ -40,7 +45,7 @@ from seatube import run_survey
 # survey["scopes"][:10]
 ```
 
-The survey’s scope strings help locate activity; get authoritative numeric IDs from `dives()` or `locations()`. A camera listed in the tree need not have observations in your date range.
+The survey’s scope strings help locate activity; get authoritative numeric IDs from `dives()` or `cameras()`. A camera listed in the tree need not have observations in your date range.
 
 ## 3. Fetch annotations once
 
@@ -48,8 +53,8 @@ The survey’s scope strings help locate activity; get authoritative numeric IDs
 annotations = sea.fetch(
     start_date="2019-07-06T00:00:00Z",
     end_date="2019-07-06T23:59:59Z",
-    camera_mode="dive",  # also "stationary" or "both"
-    resolution="L",      # mapped source video resolution; H/L/S
+    dive_ids={dives[0]["diveId"]},  # a fixed camera: node_ids={...} from cameras(), with its dates
+    resolution="L",                 # mapped source video resolution; H/L/S
     save_to="downloads/annotations.json",
 )
 print(annotations.summary())
@@ -57,9 +62,11 @@ print(annotations.summary())
 
 This fetches annotation and video **metadata**, not video bytes. It includes WoRMS-labelled observations by default. A default fetch is not restricted to one organism, so you can explore it repeatedly. For a smaller result, pass `organisms="sponges"`; that filters the returned observations and archive mapping work, but still scans the selected sources for annotations.
 
-Use `dive_ids={...}` with IDs returned by `dives()`, or `node_ids={...}` for fixed cameras. `max_dives=3` or `max_stationary_locations=2` can bound an exploratory scan, but limits deliberately make it incomplete. Date-only strings mean **midnight UTC**, not the whole day; use explicit start and end timestamps when you want a day's observations. Query endpoints are inclusive in this package.
+The IDs choose the kind of source: `dive_ids={...}` from `dives()` scans those dives, and `node_ids={...}` from `cameras()` scans those fixed cameras (passing both scans both). `location_contains="China Creek"` selects fixed cameras by label, path, or location code. With no selection, `fetch()` scans every ROV dive in the range; `camera_mode="stationary"` scans every fixed camera, and `"both"` scans both. A `camera_mode` that contradicts the IDs raises an error rather than ignoring them. `max_dives=3` or `max_stationary_locations=2` can bound an exploratory scan, but limits deliberately make it incomplete. Date-only strings mean **midnight UTC**, not the whole day; use explicit start and end timestamps when you want a day's observations. Query endpoints are inclusive in this package.
 
-A request failure raises an exception rather than returning a silently partial fetch. A successful request with no containing video file remains in the dataset as an unmapped observation. Some endpoints used here support the SeaTube web application and can change independently of the public SDK.
+A request failure raises an exception rather than returning a silently partial fetch. A successful request with no containing video file remains in the dataset as an unmapped observation. Fixed-camera annotations are mapped only to recordings from the same camera at the same site, across all of that camera's deployments. Some sites have annotations but no SeaTube video; their records stay unmapped, and the fetch logs a warning.
+
+Fixed-camera fetches return the annotations SeaTube's fixed-camera player shows. Crowd-sourced labels use a separate, non-WoRMS vocabulary and are not included. Records carry the site's position and nominal depth; ONC gives shore stations negative depths (above sea level). Some endpoints used here support the SeaTube web application and can change independently of the public SDK.
 
 ## 4. Discover what was actually annotated
 
@@ -99,7 +106,7 @@ label_matches = annotations.filter(taxon_contains="Chionoecetes")
 exact_taxon = annotations.filter(aphia_ids=[106673])
 ```
 
-Additional filters include `creator`, `creator_id`, `dive_contains`, `location_contains`, `camera_mode`, `start_date`, and `end_date`. Different filter fields combine with **AND**. Records with unknown depth are excluded when a depth bound is requested. Location text filters apply to fixed-camera name/path; use `dive_contains` for ROV dive names.
+Additional filters include `creator`, `creator_id`, `dive_contains`, `location_contains`, `camera_mode`, `start_date`, and `end_date`. Different filter fields combine with **AND**. Records with unknown depth are excluded when a depth bound is requested. `location_contains` matches a fixed camera's label, path, or ONC location code; use `dive_contains` for ROV dive names.
 
 The results retain each entire source annotation, including co-labelled taxa. Matching a crab does not mean every returned taxon label is a crab. Review fields are useful quality signals, but “reviewed” does not establish identification accuracy. `require_cross_review` checks for different creator/modifier IDs; it is only a proxy, not a reviewer-history audit.
 
@@ -189,7 +196,7 @@ A failed download or extraction raises an error. Temporary files are not publish
 
 ## If nothing matches
 
-1. Inspect `annotations.summary()` and `taxon_summary()` before filtering. Confirm dates, camera mode, and selected dive/camera IDs.
+1. Inspect `annotations.summary()` and `taxon_summary()` before filtering. Confirm dates, camera mode, and selected dive/camera IDs. For fixed cameras, compare `worms_annotations` with `annotations` in `cameras()`: comment-only records do not survive the default WoRMS filter.
 2. Check whether the annotation resolution supports your question. A generic `Porifera` observation cannot satisfy a species-specific sponge search.
 3. Read `IncompleteTaxonomyWarning` and `sea.resolver.unresolved`. Offline caches, missing AphiaIDs, unavailable lineages, or failed WoRMS requests can omit matches. Retry with a new online `SeaTube` session after the problem is resolved.
 4. Compare matched versus mapped counts. Unmapped records cannot produce media; recording gaps never fall back to a nearby file or another identified camera.

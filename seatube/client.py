@@ -10,16 +10,26 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from .archive import parse_iso_utc, to_iso_utc
+
 BASE_URL = "https://data.oceannetworks.ca"
 
 
 class OncError(RuntimeError):
-    """An ONC request failed; messages deliberately omit credential-bearing URLs."""
+    """An ONC request failed; messages deliberately omit credential-bearing URLs.
+
+    ``status_code`` carries ONC's in-payload ``statusCode`` when there is one.
+    """
+
+    def __init__(self, message: str, status_code: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class OncClient:
@@ -91,12 +101,14 @@ class OncClient:
 
         status_code = payload.get("statusCode")
         if status_code not in (None, 0):
-            msg = payload.get("message", "Unknown API error")
-            if self.token:
-                msg = str(msg).replace(self.token, "[redacted]")
-            raise OncError(f"{path} failed with statusCode={status_code}: {msg}")
+            msg = self._redact(payload.get("message", "Unknown API error"))
+            raise OncError(f"{path} failed with statusCode={status_code}: {msg}", status_code)
 
         return payload
+
+    def _redact(self, message: Any) -> str:
+        message = str(message)
+        return message.replace(self.token, "[redacted]") if self.token else message
 
     # ------------------------------------------------------------------
     # dives (ROV)
@@ -131,12 +143,47 @@ class OncClient:
         )
         return data.get("payload", {})
 
+    def fixed_camera_details(self, search_tree_node_id: int) -> Dict[str, Any]:
+        """Site metadata for one tree node; ``stationCode`` is its ONC location code."""
+        data = self.get_json(
+            "/seatube/details", {"operation": 1, "searchTreeNodeId": int(search_tree_node_id)},
+        )
+        return data.get("payload", {})
+
     def stationary_video_metadata(self, search_tree_node_id: int, resolution: str) -> Dict[str, Any]:
+        """Every recording at a site, one ``mediaFiles`` entry per device deployment.
+
+        ONC answers statusCode 9001 for sites that have no SeaTube video.
+        """
         data = self.get_json(
             "/seatube/videos",
             {"operation": 1, "searchTreeNodeId": int(search_tree_node_id), "resolution": resolution},
         )
         return data.get("payload", {})
+
+    def location_annotations(self, location_code: str, start_date: str, end_date: str) -> List[Dict[str, Any]]:
+        """Annotations SeaTube's fixed-camera player shows for one ONC location.
+
+        Records arrive complete -- taxa, people and review fields -- so no
+        per-annotation lookups are needed. ONC resolves which devices were
+        deployed at the location, and returns its ONC- and SeaScribe-sourced
+        annotations (not crowd-sourced labels). Dates must be ISO8601 UTC.
+        """
+        path = f"/api/annotations/locations/{quote(location_code, safe='')}"
+        data = self.get_json(path, {
+            "includeIds": "true",
+            # This endpoint only accepts yyyy-MM-ddTHH:mm:ss.SSSZ.
+            "dateFrom": to_iso_utc(parse_iso_utc(start_date)),
+            "dateTo": to_iso_utc(parse_iso_utc(end_date)),
+        })
+        body = data.get("payload") or {}
+        errors = body.get("errors") or []
+        if errors:
+            # Errors arrive with statusCode 0; never mistake them for "no annotations".
+            first = errors[0]
+            detail = first.get("errorMessage", first) if isinstance(first, dict) else first
+            raise OncError(f"Annotation request for location {location_code} failed: {self._redact(detail)}")
+        return (body.get("payload") or {}).get("annotations", []) or []
 
     def stationary_annotation_page(
         self,

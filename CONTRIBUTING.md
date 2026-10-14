@@ -18,7 +18,7 @@ Tests use synthetic data and block HTTP calls. If ffmpeg and ffprobe are install
 - Timestamp-to-archive containment, file boundaries, recording gaps, and device selection.
 - ONC IDs versus WoRMS AphiaIDs, taxonomic lineage membership, and unresolved classifications.
 - Download limits, interruption recovery, and provenance retained across repeated selections.
-- Both ROV and fixed-camera normalization, pagination, and request failures.
+- Both ROV and fixed-camera normalization, camera redeployments across sites and deployments, and request failures (ONC sometimes reports errors inside a successful response).
 
 Do not weaken containment or silently ignore upstream failures to obtain more results. A missing match is better represented as uncertainty than as a confidently mislabeled frame. Keep tokens, private `.env` files, downloaded datasets, and personal information out of commits and issue reports.
 
@@ -31,9 +31,10 @@ python -m pip install nbformat nbclient ipykernel
 python scripts/check_notebook.py                            # structure/syntax only
 python scripts/check_notebook.py --execute                  # live metadata and taxonomy
 python scripts/check_notebook.py --execute --download-media # also extract from one real archive
+python scripts/check_notebook.py --execute --download-media --source stationary  # fixed-camera example
 ```
 
-Use `--env-file /path/to/private/.env` with `--execute` to select a token file. The token is passed privately to the kernel, never embedded in notebook source. Execution saves a notebook with real results to ignored `downloads/research_walkthrough/verified.ipynb`. Commit the source notebook with cleared outputs. Keep `DOWNLOAD_MEDIA=False` as the user-facing default; extraction is an explicit choice after reviewing the plan. Test fixtures in the unit suite remain generated and offline.
+Use `--env-file /path/to/private/.env` with `--execute` to select a token file. The token is passed privately to the kernel, never embedded in notebook source. Execution saves a notebook with real results to ignored `downloads/research_walkthrough/verified.ipynb` (`verified_stationary.ipynb` for the fixed-camera example). Run both examples when changing shared steps. Commit the source notebook with cleared outputs. Keep `DOWNLOAD_MEDIA=False` as the user-facing default; extraction is an explicit choice after reviewing the plan. Test fixtures in the unit suite remain generated and offline.
 
 ## Reporting a problem
 

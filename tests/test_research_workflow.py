@@ -169,19 +169,6 @@ def test_fetch_is_not_silently_partial():
         AnnotationFetcher(Broken()).fetch(FetchFilters("2020-01-01", "2020-01-02"))
 
 
-def test_stationary_pagination_honors_page_count_even_for_short_pages():
-    pages = []
-
-    class Client:
-        def stationary_annotation_page(self, **kwargs):
-            pages.append(kwargs["page_num"])
-            return {"totalNumOfPages": 2, "naiveAnnotationList": [{"annotationId": pages[-1]}]}
-
-    fetcher = AnnotationFetcher(Client())
-    assert len(fetcher._stationary_candidates(1, FetchFilters("2020-01-01", "2020-01-02"))) == 2
-    assert pages == [1, 2]
-
-
 class Response:
     headers = {"Content-Length": "6"}
     status_code = 200

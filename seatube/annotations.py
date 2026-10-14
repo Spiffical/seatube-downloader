@@ -101,8 +101,13 @@ class Annotation:
         return self.raw.get("stationaryLocationName") or self.raw.get("cruiseName")
 
     @property
+    def location_code(self) -> Optional[str]:
+        """ONC location code of a fixed camera (e.g. ``CCIP``)."""
+        return self.raw.get("stationaryLocationCode")
+
+    @property
     def place(self) -> str:
-        """Dive name for ROV annotations, location name for fixed cameras."""
+        """Dive name for ROV annotations, site label for fixed cameras."""
         return self.dive_name or self.raw.get("stationaryLocationName") or "unknown"
 
     @property
@@ -487,7 +492,7 @@ class AnnotationSet:
             if location_contains:
                 blob = " ".join(
                     str(ann.raw.get(k) or "")
-                    for k in ("stationaryLocationName", "stationaryLocationPath")
+                    for k in ("stationaryLocationName", "stationaryLocationPath", "stationaryLocationCode")
                 ).lower()
                 if location_contains.lower() not in blob:
                     continue
@@ -754,6 +759,7 @@ class AnnotationSet:
                     "stationary_search_tree_node_id": ann.get("stationarySearchTreeNodeId"),
                     "stationary_location_name": ann.get("stationaryLocationName"),
                     "stationary_location_path": ann.get("stationaryLocationPath"),
+                    "stationary_location_code": ann.get("stationaryLocationCode"),
                     "resource_type_id": ann.get("resourceTypeId"),
                     "resource_type_name": ann.get("resourceTypeName"),
                     "device_id": ann.get("deviceId"),
@@ -823,6 +829,7 @@ FLAT_EXPORT_COLUMNS = [
     "annotation_start_utc", "annotation_end_utc", "annotation_duration_seconds",
     "camera_mode", "dive_id", "dive_name", "cruise_name",
     "stationary_search_tree_node_id", "stationary_location_name", "stationary_location_path",
+    "stationary_location_code",
     "resource_type_id", "resource_type_name", "device_id",
     "video_resource_id", "video_resource_type_id",
     "creator_user_id", "creator_first_name", "creator_last_name", "creator_email",

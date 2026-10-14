@@ -9,7 +9,8 @@ Start with the [Python guide](guide.md) for research workflows. The CLI remains 
 | `seatube survey` | Summarize a bulk annotation export by dive/site and annotator | ONC export |
 | `seatube fetch` | Fetch annotations and map them to archive files | ONC, and WoRMS with lineage filters |
 | `seatube dives` | Find ROV dive IDs in a date range | ONC |
-| `seatube locations` | Find fixed-camera node IDs | ONC |
+| `seatube cameras` | Find fixed cameras annotated in a date range, with node IDs and counts | ONC |
+| `seatube locations` | List every fixed-camera site and node ID, annotated or not | ONC |
 | `seatube groups` | Display the 44 group definitions | None |
 | `seatube annotators` | Summarize annotators | Local, plus WoRMS if filtering by lineage |
 | `seatube taxa` | Count taxon labels; `--show-groups` adds memberships | Local; WoRMS for lineage filters/memberships |
@@ -22,6 +23,8 @@ Examples:
 
 ```bash
 seatube fetch --start-date 2019-07-06T00:00:00Z --end-date 2019-07-06T23:59:59Z
+seatube cameras --start-date 2022-02-01T00:00:00Z --end-date 2022-02-28T23:59:59Z
+seatube fetch --start-date 2022-02-01T00:00:00Z --end-date 2022-02-28T23:59:59Z --node-id 2666
 seatube taxa --group crabs --csv crab_taxa.csv
 seatube clips --group crabs --window-seconds 60 --csv crab_moments.csv
 seatube images --group crabs --max-images 20 --max-videos 2 --dry-run
@@ -32,13 +35,13 @@ Omit `--dry-run` to extract media. This flag plans and optionally makes size req
 
 ## Shared filters
 
-Local commands read `downloads/annotations.json` by default; override with `--annotations FILE`. They accept `--group` and `--taxon-name` (repeatable), `--taxon-contains`, `--creator`, `--creator-id`, `--reviewed-only`, `--min-total-reviews`, `--require-comment`, `--dive-name-contains`, `--location-contains`, and `--camera-mode dive|stationary`.
+Local commands read `downloads/annotations.json` by default; override with `--annotations FILE`. They accept `--group` and `--taxon-name` (repeatable), `--taxon-contains`, `--creator`, `--creator-id`, `--reviewed-only`, `--min-total-reviews`, `--require-comment`, `--dive-name-contains`, `--location-contains` (fixed-camera label, path, or location code), and `--camera-mode dive|stationary`.
 
 `--worms-cache FILE` overrides the cache. `--offline-taxa` prevents WoRMS requests and warns about incomplete classification. It does not disable ONC downloads for media commands. A missing match is not proof of absence.
 
 Table commands use `--limit N` (`0` = all); annotators, taxa and clip listings accept `--csv FILE`. Media limits are separate: `--max-images`, `--max-clips`, and `--max-videos`. `--max-per-taxon` is a strict cap for frames, including co-labelled taxa. `--max-videos` caps source-file count, not bytes.
 
-Fetch options include `--camera-mode dive|stationary|both`, `--dive-id` (comma-separated), `--search-tree-node-id` (comma-separated), `--location-name-contains`, `--max-dives`, `--max-stationary-locations`, `--resolution H|L|S`, `--taxonomy-code`, `--taxonomy-id`, `--taxon-id` (ONC IDs, not AphiaIDs), people/review filters, `--flat-exports`, and `--output-dir`. Check `seatube fetch --help` for exact flags.
+Fetch options include `--dive-id` and `--node-id` (comma-separated; `--search-tree-node-id` also works), which choose the kind of source; `--camera-mode dive|stationary|both` to scan every dive or fixed camera when no IDs are given; `--location-name-contains`, `--max-dives`, `--max-stationary-locations`, `--resolution H|L|S`, `--taxonomy-code`, `--taxonomy-id`, `--taxon-id` (ONC IDs, not AphiaIDs), people/review filters, `--flat-exports`, and `--output-dir`. Check `seatube fetch --help` for exact flags.
 
 Credentials come from `ONC_TOKEN` in the environment or `.env`. `--token` is also supported, though putting tokens in shell history is best avoided.
 
@@ -54,17 +57,18 @@ Credentials come from `ONC_TOKEN` in the environment or `.env`. `--token` is als
 | `taxonomy[].referenceId`, `taxonUrl` | External WoRMS AphiaID / reference URL, when available |
 | `createdBy`, `modifiedBy` | People metadata; may include email addresses |
 | `toBeReviewed`, `numPositiveReviews`, `numTotalReviews` | Review signals, not independent validation |
-| `cameraMode`, `diveId`, `diveName`, `cruiseName`, `stationary*` | Source/place metadata |
-| `lat`, `lon`, `depth`, `heading` | Position/orientation when provided; depth in metres |
+| `cameraMode`, `diveId`, `diveName`, `cruiseName`, `stationary*` | Source/place metadata. Fixed cameras: `stationarySearchTreeNodeId`, `stationaryLocationName` (short unique label), `stationaryLocationPath`, `stationaryLocationCode` (ONC location code) |
+| `deviceId`, `deviceCode` | Recording camera |
+| `lat`, `lon`, `depth`, `heading` | Position/orientation when provided; depth in metres. Fixed cameras use the site's position and nominal depth (negative above sea level) |
 | `archiveFilename`, `archiveClipStartDate`, `clipDurationSeconds` | Containing archive file and bounds |
-| `videoMappingStatus` | `strict_containment`, `no_containing_data_file`, `no_media_for_device`, or `missing_timestamp`; older records may lack a status |
+| `videoMappingStatus` | `strict_containment`, `no_containing_data_file`, `no_media_for_device` (including fixed-camera sites without SeaTube video), or `missing_timestamp`; older records may lack a status |
 | `contextualLink` | Source moment in the SeaTube player |
 
 Taxonomy lineages are separate in `.worms_cache.json`, keyed by WoRMS AphiaID. ONC IDs must never be used as AphiaIDs. Keep caches with the analysis for reproducibility. Check raw records for personal metadata before sharing derived datasets publicly.
 
 ## Archive mapping and media indexes
 
-Video metadata describes intervals `[start, end)`; timestamps exactly at an interval’s end belong to the next interval, if any. Millisecond corrections are included. No containing interval means no media mapping. When a device ID is supplied, a different camera is never used as a substitute.
+Video metadata describes intervals `[start, end)`; timestamps exactly at an interval’s end belong to the next interval, if any. Millisecond corrections are included. No containing interval means no media mapping. When a device is identified, a different camera is never used as a substitute. A fixed camera has one media series per deployment; every series recorded at the annotation's site is searched.
 
 A seek position is `annotation start - archive file start`. `clipOffsetSeconds` is the archive’s position in a larger media series and must not be used as a seek position.
 

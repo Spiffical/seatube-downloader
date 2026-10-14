@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/Spiffical/seatube-downloader/actions/workflows/tests.yml/badge.svg)](https://github.com/Spiffical/seatube-downloader/actions/workflows/tests.yml)
 
-Find annotated organisms in Ocean Networks Canada’s SeaTube archive. Search by organism, dive, location, or date, then extract frames and video clips with their labels and source metadata.
+Find annotated organisms in Ocean Networks Canada’s SeaTube archive, from **ROV dives** or **fixed cameras**. Search by organism, dive, camera, or date, then extract frames and video clips with their labels and source metadata.
 
 Searches use existing annotations; the package does not detect organisms in unannotated video. Available data depends on your selected dates and locations.
 
@@ -53,21 +53,46 @@ ONC_TOKEN=your-token-here
 
 Keep the token private. `.env` is ignored by Git; do not paste its contents into notebook cells or outputs. An `ONC_TOKEN` environment variable takes precedence over `.env`.
 
-Run `jupyter lab` and open [examples/research_walkthrough.ipynb](examples/research_walkthrough.ipynb). The notebook queries real annotations and requires your token. Video downloads are a separate opt-in.
+Run `jupyter lab` and open [examples/research_walkthrough.ipynb](examples/research_walkthrough.ipynb). The notebook queries real annotations and requires your token; it runs an ROV dive example by default, or a fixed-camera example with `SOURCE = "stationary"`. Video downloads are a separate opt-in.
 
 ## Find data and plan a download
+
+SeaTube has two kinds of video. **ROV dives** survey a site for a few hours. **Fixed cameras** are observatory cameras that record the same view on a schedule for months or years. Each kind has its own discovery call; after `fetch()`, the workflow is identical.
 
 ```python
 from seatube import SeaTube
 
 sea = SeaTube(data_dir="downloads")  # loads ONC_TOKEN and caches taxonomy
 sea.groups("crab")                   # inspect supported search definitions
+```
 
+From an **ROV dive**:
+
+```python
+dives = sea.dives("2019-07-06T00:00:00Z", "2019-07-06T23:59:59Z")  # diveId, name, dates
 annotations = sea.fetch(
-    start_date="2019-07-06T00:00:00Z",
-    end_date="2019-07-06T23:59:59Z",
+    "2019-07-06T00:00:00Z", "2019-07-06T23:59:59Z",
+    dive_ids={dives[0]["diveId"]},
     save_to="downloads/annotations.json",
 )
+```
+
+From a **fixed camera**:
+
+```python
+cameras = sea.cameras("2022-02-01T00:00:00Z", "2022-02-28T23:59:59Z")  # cameras annotated in the range
+for camera in cameras:
+    print(camera["searchTreeNodeId"], camera["label"], camera["worms_annotations"])
+annotations = sea.fetch(
+    "2022-02-01T00:00:00Z", "2022-02-28T23:59:59Z",
+    node_ids={cameras[0]["searchTreeNodeId"]},  # China Creek Underwater Network
+    save_to="downloads/annotations.json",
+)
+```
+
+Then, for either source:
+
+```python
 print(annotations.summary())
 
 # What was actually annotated in this dataset?
@@ -90,7 +115,7 @@ images = sea.image_downloader("outputs/crab_frames", keep_videos=True)
 print(images.describe_plan(frames))  # estimates cost; no video download
 ```
 
-Fetches retrieve metadata only. ROV dives are the default; select fixed cameras with `camera_mode="stationary"`, or both sources with `"both"`. Use `sea.dives(...)` and `sea.locations()` to discover IDs. The [guide](docs/guide.md) covers date, place, depth, annotator, and review filters.
+Fetches retrieve metadata only. `dive_ids` or `node_ids` decides which kind of source is scanned. With neither, `fetch()` scans every ROV dive in the range; pass `camera_mode="stationary"` to scan every fixed camera instead, or `"both"`. `cameras()` sorts by `worms_annotations`, the WoRMS-labelled records that organism searches use; many fixed-camera annotations are comments only. The [guide](docs/guide.md) covers date, place, depth, annotator, and review filters.
 
 `people_summary()` lists people in the current selection, with names, IDs, and counts. `creator_ids=[...]` filters annotation authors; `modifier_ids=[...]` filters last editors. Use `None` to leave a role unrestricted. Last editors are not necessarily reviewers, and these records do not provide a complete named reviewer history. The [notebook](examples/research_walkthrough.ipynb) demonstrates both filters on crab annotations and shows each record's author and last editor.
 
@@ -116,6 +141,7 @@ Each output has a CSV/JSONL index with taxa, IDs, archive offsets, annotators, l
 
 - **Whole-file downloads:** one frame can require a full source archive. Plans favor files with more requested outputs; they do not minimize bytes or produce a representative sample. Unknown sizes stay unknown. `max_videos` caps files, not bytes.
 - **Taxonomic resolution:** species queries cannot recover observations labelled only to family or phylum. Unknown names are not spell-corrected. Groups overlap, so their counts are not additive.
+- **Fixed cameras:** fetches return the annotations SeaTube’s fixed-camera player shows. Crowd-sourced labels, which use a separate non-WoRMS vocabulary, are not included. Position and depth are the site’s; ONC gives shore stations negative depths (above sea level). A camera revisits one view, so nearby frames are strongly correlated.
 - **Network access:** saved annotations support repeated local analysis. Uncached lineages require WoRMS; `offline_taxa=True` uses cached classifications and warns about unresolved taxa.
 - **Interpretation:** annotations are observations, not abundance estimates or bounding boxes. Zero matches do not establish absence, and an organism may not remain visible throughout a clip. Inspect media before treating labels as ground truth.
 
@@ -123,6 +149,9 @@ Each output has a CSV/JSONL index with taxa, IDs, archive offsets, annotators, l
 
 ```bash
 seatube groups
+seatube dives --start-date 2019-07-06T00:00:00Z --end-date 2019-07-06T23:59:59Z
+seatube cameras --start-date 2022-02-01T00:00:00Z --end-date 2022-02-28T23:59:59Z
+seatube fetch --start-date 2022-02-01T00:00:00Z --end-date 2022-02-28T23:59:59Z --node-id 2666
 seatube taxa --annotations downloads/annotations.json
 seatube images --group crabs --max-images 20 --max-videos 2 --dry-run
 seatube extract-clips --group crabs --max-clips 5 --max-videos 2 --dry-run
@@ -132,4 +161,4 @@ See the [CLI and data reference](docs/reference.md) for commands and output sche
 
 ## Data and credit
 
-This is an independent tool for [ONC SeaTube](https://data.oceannetworks.ca/SeaTube). Follow ONC’s [data policy](https://www.oceannetworks.ca/data-tools/data-policy/) and [citation guidance](https://www.oceannetworks.ca/data/how-to-cite-onc/). Credit ONC, the expedition teams, annotators, and taxonomy sources as appropriate.
+This is an independent tool for [ONC SeaTube](https://data.oceannetworks.ca/SeaTube). Follow ONC’s [data policy](https://www.oceannetworks.ca/data-tools/data-policy/) and [citation guidance](https://www.oceannetworks.ca/data/how-to-cite-onc/). Credit ONC, the expedition and observatory teams, annotators, and taxonomy sources as appropriate.
